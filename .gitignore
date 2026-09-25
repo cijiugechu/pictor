@@ -1,0 +1,6 @@
+/.zig-cache/
+/zig-out/
+/build/
+/models/
+/outputs/
+.DS_Store

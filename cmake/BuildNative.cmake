@@ -1,0 +1,10 @@
+# Zig steps may run concurrently; Ninja invocations sharing a directory must not.
+file(LOCK "${NATIVE_DIR}/pictor-build.lock" GUARD PROCESS TIMEOUT 600)
+set(arguments --build "${NATIVE_DIR}" --parallel "${JOBS}")
+if(DEFINED NATIVE_TARGET)
+    list(APPEND arguments --target "${NATIVE_TARGET}")
+endif()
+execute_process(COMMAND "${CMAKE_COMMAND}" ${arguments} RESULT_VARIABLE result)
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "Native build failed: ${result}")
+endif()

@@ -1,0 +1,7 @@
+.{
+    .name = .pictor,
+    .version = "0.1.0",
+    .fingerprint = 0x08c74647252d3e1b,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{ "build.zig", "build.zig.zon", "cmake", "include", "src", "scripts", "patches", "tests", "examples", "vendor", "docs", "README.md", "THIRD_PARTY_NOTICES.md" },
+}
