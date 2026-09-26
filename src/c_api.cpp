@@ -1,9 +1,19 @@
 #include "pictor/pictor.h"
 #include "pictor/anima.hpp"
+#include "pictor/flux_klein.hpp"
 
 #include <new>
 
-struct pictor_session { std::unique_ptr<pictor::AnimaSession> value; };
+struct pictor_session {
+    // Exactly one owner is set by a successful factory; handles are opaque to callers.
+    std::unique_ptr<pictor::AnimaSession> value;
+    std::unique_ptr<pictor::FluxKleinSession> klein;
+    double load_seconds() const noexcept { return value ? value->load_seconds() : klein->load_seconds(); }
+    pictor::Status generate(const pictor::GenerationRequest& request, pictor::Image& image,
+                           pictor::ProgressCallback progress, void* userdata) noexcept {
+        return value ? value->generate(request, image, progress, userdata) : klein->generate(request, image, progress, userdata);
+    }
+};
 struct pictor_image { pictor::Image value; };
 
 namespace {
@@ -84,11 +94,76 @@ pictor_status pictor_session_create(const pictor_session_options* options, picto
     return finish(status, error);
 }
 
+pictor_status pictor_flux_klein_options_init(pictor_flux_klein_options* output, size_t size, pictor_error* error) noexcept {
+    if (!output || size != sizeof(*output))
+        return finish(failure(ErrorCode::invalid_argument, "invalid Klein options pointer or size"), error);
+    *output = {sizeof(*output), nullptr, nullptr, nullptr, 0, 0};
+    return finish({}, error);
+}
+
+pictor_status pictor_flux_klein_request_init(pictor_request* output, size_t size, pictor_error* error) noexcept {
+    if (!output || size != sizeof(*output))
+        return finish(failure(ErrorCode::invalid_argument, "invalid request pointer or size"), error);
+    const auto value = pictor::flux_klein_request();
+    *output = {sizeof(*output), nullptr, nullptr, value.width, value.height, value.steps,
+               value.cfg_scale, value.seed, PICTOR_CACHE_NONE, 0};
+    return finish({}, error);
+}
+
+pictor_status pictor_flux_klein_session_create(const pictor_flux_klein_options* options, pictor_session** output, pictor_error* error) noexcept {
+    if (!output || *output)
+        return finish(failure(ErrorCode::invalid_argument, "session output must point to NULL"), error);
+    if (!options || options->struct_size != sizeof(*options) || !options->diffusion_model_path ||
+        !options->text_encoder_path || !options->vae_path || options->verbose > 1)
+        return finish(failure(ErrorCode::invalid_argument, "invalid Klein session options"), error);
+    auto session = std::unique_ptr<pictor_session>(new (std::nothrow) pictor_session);
+    if (!session) return finish(failure(ErrorCode::out_of_memory, "cannot allocate session handle"), error);
+    const auto status = pictor::FluxKleinSession::create({options->diffusion_model_path, options->text_encoder_path,
+        options->vae_path, options->threads, options->verbose != 0}, session->klein);
+    if (status) *output = session.release();
+    return finish(status, error);
+}
+
 pictor_status pictor_session_load_seconds(const pictor_session* session, double* output, pictor_error* error) noexcept {
     if (output) *output = 0;
     if (!session || !output) return finish(failure(ErrorCode::invalid_argument, "session and output must not be NULL"), error);
-    *output = session->value->load_seconds();
+    *output = session->load_seconds();
     return finish({}, error);
+}
+
+pictor_status pictor_flux_klein_edit_options_init(pictor_flux_klein_edit_options* output, size_t size, pictor_error* error) noexcept {
+    if (!output || size != sizeof(*output))
+        return finish(failure(ErrorCode::invalid_argument, "invalid edit options pointer or size"), error);
+    *output = {sizeof(*output), nullptr, 0, 1};
+    return finish({}, error);
+}
+
+pictor_status pictor_flux_klein_session_edit(pictor_session* session, const pictor_request* request,
+    const pictor_flux_klein_edit_options* options, pictor_progress_callback progress, void* userdata,
+    pictor_image** output, pictor_error* error) noexcept {
+    if (!output || *output)
+        return finish(failure(ErrorCode::invalid_argument, "image output must point to NULL"), error);
+    if (!session || !session->klein)
+        return finish(failure(ErrorCode::invalid_argument, "reference editing requires a Klein session"), error);
+    if (!options || options->struct_size != sizeof(*options) || options->auto_resize > 1 ||
+        !options->reference_images || options->reference_images_count < 1 || options->reference_images_count > 4)
+        return finish(failure(ErrorCode::invalid_argument, "invalid Klein edit options; expected 1..4 references"), error);
+    pictor::FluxKleinEditRequest value;
+    if (const auto status = convert_request(request, value.generation); !status) return finish(status, error);
+    value.auto_resize = options->auto_resize != 0;
+    for (size_t i = 0; i < options->reference_images_count; ++i) {
+        const auto& ref = options->reference_images[i];
+        if (ref.struct_size != sizeof(ref))
+            return finish(failure(ErrorCode::invalid_argument, "invalid reference image struct_size"), error);
+        value.reference_images.push_back({ref.width, ref.height, ref.pixels, ref.pixels_len});
+    }
+    if (const auto status = pictor::validate_flux_klein_edit_request(value); !status) return finish(status, error);
+    auto image = std::unique_ptr<pictor_image>(new (std::nothrow) pictor_image);
+    if (!image) return finish(failure(ErrorCode::out_of_memory, "cannot allocate image handle"), error);
+    Callback callback{progress, userdata};
+    const auto status = session->klein->edit(value, image->value, progress ? Callback::invoke : nullptr, &callback);
+    if (status) *output = image.release();
+    return finish(status, error);
 }
 
 pictor_status pictor_session_generate(pictor_session* session, const pictor_request* request,
@@ -101,7 +176,7 @@ pictor_status pictor_session_generate(pictor_session* session, const pictor_requ
     auto image = std::unique_ptr<pictor_image>(new (std::nothrow) pictor_image);
     if (!image) return finish(failure(ErrorCode::out_of_memory, "cannot allocate image handle"), error);
     Callback callback{progress, userdata};
-    const auto status = session->value->generate(value, image->value, progress ? Callback::invoke : nullptr, &callback);
+    const auto status = session->generate(value, image->value, progress ? Callback::invoke : nullptr, &callback);
     if (status) *output = image.release();
     return finish(status, error);
 }
@@ -124,4 +199,14 @@ pictor_status pictor_image_write_png(const pictor_image* image, const char* path
 }
 
 void pictor_image_destroy(pictor_image* image) noexcept { delete image; }
+
+pictor_status pictor_image_load(const char* path, pictor_image** output, pictor_error* error) noexcept {
+    if (!output || *output || !path)
+        return finish(failure(ErrorCode::invalid_argument, "image output must point to NULL and path must not be NULL"), error);
+    auto image = std::unique_ptr<pictor_image>(new (std::nothrow) pictor_image);
+    if (!image) return finish(failure(ErrorCode::out_of_memory, "cannot allocate image handle"), error);
+    const auto status = pictor::read_image(path, image->value);
+    if (status) *output = image.release();
+    return finish(status, error);
+}
 } // extern "C"

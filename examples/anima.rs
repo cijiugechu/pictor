@@ -24,6 +24,15 @@ struct Options {
     verbose: u32,
 }
 #[repr(C)]
+struct KleinOptions {
+    struct_size: usize,
+    diffusion_model_path: *const c_char,
+    text_encoder_path: *const c_char,
+    vae_path: *const c_char,
+    threads: i32,
+    verbose: u32,
+}
+#[repr(C)]
 struct Request {
     struct_size: usize,
     prompt: *const c_char,
@@ -48,11 +57,38 @@ struct ImageInfo {
 }
 type Progress = Option<unsafe extern "C" fn(i32, i32, f32, *mut c_void)>;
 
+#[repr(C)]
+struct ImageView {
+    struct_size: usize,
+    width: i32,
+    height: i32,
+    pixels: *const u8,
+    pixels_len: usize,
+}
+#[repr(C)]
+struct EditOptions {
+    struct_size: usize,
+    reference_images: *const ImageView,
+    reference_images_count: usize,
+    auto_resize: u32,
+}
+
 #[link(name = "pictor")]
 unsafe extern "C" {
     fn pictor_abi_version() -> u32;
     fn pictor_session_options_init(out: *mut Options, size: usize, error: *mut Error) -> i32;
     fn pictor_request_init(out: *mut Request, size: usize, preset: i32, error: *mut Error) -> i32;
+    fn pictor_flux_klein_options_init(
+        out: *mut KleinOptions,
+        size: usize,
+        error: *mut Error,
+    ) -> i32;
+    fn pictor_flux_klein_request_init(out: *mut Request, size: usize, error: *mut Error) -> i32;
+    fn pictor_flux_klein_session_create(
+        options: *const KleinOptions,
+        out: *mut *mut Session,
+        error: *mut Error,
+    ) -> i32;
     fn pictor_request_validate(request: *const Request, error: *mut Error) -> i32;
     fn pictor_session_create(
         options: *const Options,
@@ -76,6 +112,21 @@ unsafe extern "C" {
     ) -> i32;
     fn pictor_image_write_png(image: *const Image, path: *const c_char, error: *mut Error) -> i32;
     fn pictor_image_destroy(image: *mut Image);
+    fn pictor_image_load(path: *const c_char, out: *mut *mut Image, error: *mut Error) -> i32;
+    fn pictor_flux_klein_edit_options_init(
+        out: *mut EditOptions,
+        size: usize,
+        error: *mut Error,
+    ) -> i32;
+    fn pictor_flux_klein_session_edit(
+        session: *mut Session,
+        request: *const Request,
+        options: *const EditOptions,
+        progress: Progress,
+        userdata: *mut c_void,
+        out: *mut *mut Image,
+        error: *mut Error,
+    ) -> i32;
 }
 
 struct SessionOwner(*mut Session);
@@ -111,7 +162,11 @@ unsafe extern "C" fn progress(_: i32, _: i32, _: f32, userdata: *mut c_void) {
 }
 
 fn run() -> Result<(), String> {
-    let model_arg = std::env::args().nth(1);
+    let mut args = std::env::args().skip(1);
+    let first = args.next();
+    let klein = first.as_deref() == Some("--klein");
+    let model_arg = if klein { args.next() } else { first };
+    let reference_path = if klein { args.next() } else { None };
     let model = CString::new(
         model_arg
             .as_deref()
@@ -131,17 +186,68 @@ fn run() -> Result<(), String> {
             pictor_session_options_init(&mut options, size_of::<Options>(), &mut error),
             &error,
         )?;
-        check(
-            pictor_request_init(&mut request, size_of::<Request>(), 0, &mut error),
-            &error,
-        )?;
+        if klein {
+            check(
+                pictor_flux_klein_request_init(&mut request, size_of::<Request>(), &mut error),
+                &error,
+            )?;
+        } else {
+            check(
+                pictor_request_init(&mut request, size_of::<Request>(), 0, &mut error),
+                &error,
+            )?;
+        }
         request.prompt = prompt.as_ptr();
+        if reference_path.is_some() {
+            request.prompt =
+                c"Change the scene to snowy winter. Keep the subject and composition.".as_ptr();
+        }
         request.seed = 666;
         request.cache = 0;
         check(pictor_request_validate(&request, &mut error), &error)?;
+        let mut edit: EditOptions = zeroed();
+        check(
+            pictor_flux_klein_edit_options_init(&mut edit, size_of::<EditOptions>(), &mut error),
+            &error,
+        )?;
         options.model_path = model.as_ptr();
         let mut session = SessionOwner(ptr::null_mut());
-        let status = pictor_session_create(&options, &mut session.0, &mut error);
+        let status = if klein {
+            let directory =
+                std::path::Path::new(model_arg.as_deref().unwrap_or("/nonexistent-pictor-klein"));
+            let diffusion = CString::new(
+                directory
+                    .join("flux-2-klein-4b-Q4_0.gguf")
+                    .to_string_lossy()
+                    .as_bytes(),
+            )
+            .map_err(|e| e.to_string())?;
+            let encoder = CString::new(
+                directory
+                    .join("Qwen3-4B-Q4_K_M.gguf")
+                    .to_string_lossy()
+                    .as_bytes(),
+            )
+            .map_err(|e| e.to_string())?;
+            let vae = CString::new(
+                directory
+                    .join("flux2-vae.safetensors")
+                    .to_string_lossy()
+                    .as_bytes(),
+            )
+            .map_err(|e| e.to_string())?;
+            let mut paths: KleinOptions = zeroed();
+            check(
+                pictor_flux_klein_options_init(&mut paths, size_of::<KleinOptions>(), &mut error),
+                &error,
+            )?;
+            paths.diffusion_model_path = diffusion.as_ptr();
+            paths.text_encoder_path = encoder.as_ptr();
+            paths.vae_path = vae.as_ptr();
+            pictor_flux_klein_session_create(&paths, &mut session.0, &mut error)
+        } else {
+            pictor_session_create(&options, &mut session.0, &mut error)
+        };
         if model_arg.is_none() {
             if status != 1 || !session.0.is_null() || error.message[0] == 0 {
                 return Err("unexpected error result".into());
@@ -152,7 +258,37 @@ fn run() -> Result<(), String> {
         check(status, &error)?;
         let mut image = ImageOwner(ptr::null_mut());
         let mut calls: usize = 0;
-        check(
+        let mut reference = ImageOwner(ptr::null_mut());
+        let generated = if let Some(path) = reference_path.as_deref() {
+            let path = CString::new(path).map_err(|e| e.to_string())?;
+            check(
+                pictor_image_load(path.as_ptr(), &mut reference.0, &mut error),
+                &error,
+            )?;
+            let mut info: ImageInfo = zeroed();
+            check(
+                pictor_image_get_info(reference.0, &mut info, size_of::<ImageInfo>(), &mut error),
+                &error,
+            )?;
+            let view = ImageView {
+                struct_size: size_of::<ImageView>(),
+                width: info.width,
+                height: info.height,
+                pixels: info.pixels,
+                pixels_len: info.pixels_len,
+            };
+            edit.reference_images = &view;
+            edit.reference_images_count = 1;
+            pictor_flux_klein_session_edit(
+                session.0,
+                &request,
+                &edit,
+                Some(progress),
+                (&mut calls as *mut usize).cast(),
+                &mut image.0,
+                &mut error,
+            )
+        } else {
             pictor_session_generate(
                 session.0,
                 &request,
@@ -160,16 +296,17 @@ fn run() -> Result<(), String> {
                 (&mut calls as *mut usize).cast(),
                 &mut image.0,
                 &mut error,
-            ),
-            &error,
-        )?;
+            )
+        };
+        check(generated, &error)?;
         let mut info: ImageInfo = zeroed();
         check(
             pictor_image_get_info(image.0, &mut info, size_of::<ImageInfo>(), &mut error),
             &error,
         )?;
+        let expected_bytes = if klein { 512 * 512 * 3 } else { 512 * 768 * 3 };
         if info.pixels.is_null()
-            || info.pixels_len != 512 * 768 * 3
+            || info.pixels_len != expected_bytes
             || info.seed != 666
             || calls == 0
         {
@@ -177,10 +314,31 @@ fn run() -> Result<(), String> {
         }
         let pixels = std::slice::from_raw_parts(info.pixels, info.pixels_len); // borrowed from image
         check(
-            pictor_image_write_png(image.0, c"outputs/rust.png".as_ptr(), &mut error),
+            pictor_image_write_png(
+                image.0,
+                (if reference_path.is_some() {
+                    c"outputs/rust-klein-edit.png"
+                } else if klein {
+                    c"outputs/rust-klein.png"
+                } else {
+                    c"outputs/rust.png"
+                })
+                .as_ptr(),
+                &mut error,
+            ),
             &error,
         )?;
-        println!("wrote outputs/rust.png ({} RGB bytes)", pixels.len());
+        println!(
+            "wrote {} ({} RGB bytes)",
+            if reference_path.is_some() {
+                "outputs/rust-klein-edit.png"
+            } else if klein {
+                "outputs/rust-klein.png"
+            } else {
+                "outputs/rust.png"
+            },
+            pixels.len()
+        );
     }
     Ok(())
 }

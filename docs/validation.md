@@ -1,5 +1,112 @@
 # Initial validation — 2026-09-26
 
+## Follow-up: Klein reference-image editing
+
+The same three Klein weight files now support reference editing, with the full
+VAE encoder/decoder loaded in each Klein session. Existing C ABI structs and
+entry points are unchanged; edit options, RGB views and image loading are additive.
+
+- Metal and CPU `zig build test test-ffi` passed **51/51 steps**. Fixtures cover
+  PNG alpha conversion, JPEG decoding, corrupted input, image ownership, invalid
+  RGB lengths/dimensions, extreme aspect ratios, CLI reference ordering/limits,
+  early missing-input failure, C edit errors and both Zig/Rust example modes.
+- The test backend exercises multiple ordered RGB references, input immutability,
+  output/reference aliasing in C++, edit-to-text reuse, callback isolation and
+  C output lifetime after session destruction.
+- `zig build smoke-klein-edit` passed **23/23 steps** on Metal. Real C++ and C ABI
+  edits have identical RGB pixels and both match upstream sd-cli exactly:
+  **0 changed RGB channels, maximum delta 0**. The source image is unchanged.
+  Callbacks, invalid-buffer recovery and output ownership also pass.
+- Text generation immediately after an edit, in the same resident C++ session,
+  still matches the phase-1 text-to-image baseline exactly (0 changed channels).
+  Previously compiled C/C++ consumers also continue to pass their API checks.
+- A real CLI batch used two ordered 512×512 reference images, auto-resized for
+  64×64 one-step output, with seeds 42/43. Both images succeeded with one model
+  load and distinct outputs. Ordered absolute reference paths, edit mode, resize
+  flag and seeds in JSON were verified; stdout contains exactly two image paths.
+  This checks multi-reference integration, not image quality at that resolution.
+
+Reference: phase-1 `outputs/klein-reference.png` (512×512 fox). Prompt:
+“Change the fox's fur to white and the forest to a snowy winter scene. Keep the
+fox's pose and composition.” All runs use seed 666, 512×512, four steps,
+CFG 1, Euler/discrete, diffusion flash attention, auto-resized references,
+no cache and no VAE tiling. Visual inspection found white fur and a snowy forest
+with the seated pose/rock composition retained. The output is a model-generated
+edit, not a pixel-preservation or masked-edit guarantee.
+
+| Run | Generation |
+| --- | ---: |
+| Upstream reference edit | 141.43 s |
+| C++ edit | 113.027 s |
+| Text generation after edit | 61.062 s |
+| C ABI edit | 114.195 s |
+
+These M4 timings are functional observations with uncontrolled system load and
+cache state. They do not establish a speedup. CPU inference and real editing
+from the standalone Zig/Rust examples were not exercised; those examples were
+compiled and their ABI initialization/link/error paths checked.
+
+## Follow-up: Klein 4B distilled, phase 1
+
+The existing pinned sd.cpp revision and Metal patch are unchanged. A separate
+one-line patch makes split-file loading respect the installed progress callback
+instead of writing stray separator newlines to stdout. It does not change model
+loading or sampling calculations. Klein uses
+the three pinned files in [klein.md](klein.md), all downloaded and SHA-256
+verified, on the same Apple M4 / 32 GiB host.
+
+- Metal and CPU `zig build test test-ffi` each passed 46/46 build steps. New
+  checks cover split paths, model defaults/restrictions, additive C ABI sizes
+  and errors, and both Zig/Rust example modes. CPU inference was not exercised.
+- A deterministic backend fixture runs Anima and Klein from competing threads.
+  It checks shared serialization, callback userdata isolation, model parameter
+  routing, error recovery and image ownership.
+- `zig build smoke-klein` passed 22/22 build steps. Two identical C++ requests
+  reuse one resident context and produce identical RGB pixels. A fresh C ABI
+  context rejects Spectrum, then generates the same image successfully. Progress
+  callbacks (0..4), image access and PNG writing after session destruction pass.
+- Both the C++ and C ABI PNGs match the pinned upstream `sd-cli` reference
+  exactly: **0 changed RGB channels; maximum delta 0**. The reference image was
+  visually inspected. This establishes parity only for the tested files,
+  backend, build, device and request.
+- Anima `zig build smoke-c` passed 22/22 build steps after the shared-runtime
+  refactor. Its repeated 512×768, 3-step no-cache generation still matches the
+  original upstream baseline exactly (0 changed channels). Load was 3.408 s;
+  generation was 59.697 s and 49.674 s.
+- Existing, previously compiled C11 and C++17 clients run against the new
+  library. The old C ABI layouts/signatures and Anima defaults remain intact;
+  new Klein C and C++ symbols are exported. Zig/Rust Klein examples were checked
+  without weights; real Klein FFI inference was exercised through the C ABI
+  smoke test.
+
+The 512×512 parity request uses the prompt “A small red fox sitting on a mossy
+rock in a sunlit forest, detailed fur, soft natural light”, seed 666, 4 steps,
+CFG 1, Euler/discrete, no cache, and diffusion-only flash attention. Neither
+parameter CPU offload nor VAE tiling is enabled. Timings are development
+observations with uncontrolled system load and cache state, not benchmarks.
+
+| Run | Resolution | Load | Generation |
+| --- | --- | ---: | ---: |
+| Upstream sd-cli | 512×512 | included in 90.72 s wall time | 82.41 s |
+| C++ first request | 512×512 | 8.912 s | 96.316 s |
+| C++ resident repeat | 512×512 | reused | 90.858 s |
+| C ABI fresh context | 512×512 | not recorded | 93.198 s |
+| CLI | 1024×1024 | 7.631 s | 331.786 s |
+
+The upstream reference's maximum process RSS was 8,182,153,216 bytes. This is
+process accounting, not a complete measurement of GPU/unified memory use.
+The 1024×1024 CLI run took 339.99 s wall time with maximum RSS 8,721,498,112 bytes
+and peak physical footprint 8,172,723,064 bytes. Its image was visually inspected;
+PNG dimensions and JSON model paths, settings, seed and timings were checked.
+That run exposed two stray stdout newlines from the upstream split-file loader,
+which prompted the progress-callback patch described above.
+After rebuilding both backends with that patch, Metal and CPU tests again passed
+46/46 steps. A real 64×64, 1-step Klein CLI run then passed strict stdout checking
+(exactly one PNG path plus its newline), stderr severity/progress checks and
+PNG/JSON validation. Patch preparation was also run twice to verify idempotence.
+Image editing, base/9B checkpoints, other quantizations, CUDA, SDNQ/Quanto
+loading and MLX/hidden-state accelerations remain outside this phase.
+
 ## Follow-up: C ABI and explicit C++ errors
 
 Pictor's C++ APIs now return `Status` with output parameters. The C++ types remain;

@@ -39,7 +39,15 @@ Status parse(const std::vector<std::string>& args, Options& output) noexcept {
     if (args.size() == 1 && args[0] == "--version") {
         options.version = true; output = std::move(options); return {};
     }
-    if (args[0] != "anima") return failure(ErrorCode::invalid_argument, "expected the 'anima' command (see --help)");
+    if (args[0] == "flux-klein") {
+        options.model = Model::flux_klein;
+        options.session.model_path = "models/flux2-klein-4b/flux-2-klein-4b-Q4_0.gguf";
+        options.text_encoder = "models/flux2-klein-4b/Qwen3-4B-Q4_K_M.gguf";
+        options.vae = "models/flux2-klein-4b/flux2-vae.safetensors";
+        options.request = flux_klein_request();
+    } else if (args[0] != "anima") {
+        return failure(ErrorCode::invalid_argument, "expected 'anima' or 'flux-klein' (see --help)");
+    }
 
     Preset preset = Preset::balanced;
     std::optional<int> steps;
@@ -50,10 +58,29 @@ Status parse(const std::vector<std::string>& args, Options& output) noexcept {
         if (arg == "--verbose") { options.session.verbose = true; continue; }
         if (arg == "--overwrite") { options.overwrite = true; continue; }
         if (arg == "--vae-tiling") { options.request.vae_tiling = true; continue; }
+        if (arg == "--disable-auto-resize-ref-image") {
+            if (options.model != Model::flux_klein) return failure(ErrorCode::invalid_argument, "reference flags require flux-klein");
+            options.auto_resize_reference = false; continue;
+        }
         if (i + 1 >= args.size()) return failure(ErrorCode::invalid_argument, "missing value for " + arg);
         const auto& value = args[++i];
         Status status;
-        if (arg == "--model") options.session.model_path = value;
+        if (arg == "--model") {
+            if (options.model != Model::anima) return failure(ErrorCode::invalid_argument, "Klein uses --diffusion-model, --text-encoder and --vae");
+            options.session.model_path = value;
+        } else if (arg == "--diffusion-model" || arg == "--text-encoder" || arg == "--llm" || arg == "--vae") {
+            if (options.model != Model::flux_klein) return failure(ErrorCode::invalid_argument, arg + " is only supported by flux-klein");
+            if (arg == "--diffusion-model") options.session.model_path = value;
+            else if (arg == "--vae") options.vae = value;
+            else options.text_encoder = value;
+        }
+        else if (arg == "--ref-image" || arg == "-r") {
+            if (options.model != Model::flux_klein || value.empty())
+                return failure(ErrorCode::invalid_argument, "--ref-image requires flux-klein and a nonempty path");
+            if (options.reference_images.size() == 4)
+                return failure(ErrorCode::invalid_argument, "at most 4 reference images are supported");
+            options.reference_images.emplace_back(value);
+        }
         else if (arg == "--prompt" || arg == "-p") options.request.prompt = value;
         else if (arg == "--negative-prompt") options.request.negative_prompt = value;
         else if (arg == "--output" || arg == "-o") options.output = value;
@@ -65,6 +92,7 @@ Status parse(const std::vector<std::string>& args, Options& output) noexcept {
         else if (arg == "--count") status = integer(value, arg, options.count);
         else if (arg == "--threads") status = integer(value, arg, options.session.threads);
         else if (arg == "--preset") {
+            if (options.model != Model::anima) return failure(ErrorCode::invalid_argument, "--preset is Anima-only; Klein defaults to 4 steps");
             if (value == "fast") preset = Preset::fast;
             else if (value == "balanced") preset = Preset::balanced;
             else if (value == "quality") preset = Preset::quality;
@@ -77,10 +105,15 @@ Status parse(const std::vector<std::string>& args, Options& output) noexcept {
         if (!status) return status;
     }
 
-    const auto defaults = preset_request(preset);
+    const auto defaults = options.model == Model::anima ? preset_request(preset) : flux_klein_request();
     options.request.steps = steps.value_or(defaults.steps);
     options.request.cache = cache.value_or(defaults.cache);
-    if (const auto status = validate_request(options.request); !status) return status;
+    const auto validation = options.model == Model::anima ? validate_request(options.request) : validate_flux_klein_request(options.request);
+    if (!validation) return validation;
+    if (!options.auto_resize_reference && options.reference_images.empty())
+        return failure(ErrorCode::invalid_argument, "--disable-auto-resize-ref-image requires --ref-image");
+    if (options.model == Model::flux_klein && (options.text_encoder.empty() || options.vae.empty()))
+        return failure(ErrorCode::invalid_argument, "Klein text encoder and VAE paths must not be empty");
     if (options.session.model_path.empty()) return failure(ErrorCode::invalid_argument, "model path must not be empty");
     if (options.session.threads < 0) return failure(ErrorCode::invalid_argument, "threads must be nonnegative");
     if (options.count < 1 || options.count > 64) return failure(ErrorCode::invalid_argument, "count must be between 1 and 64");
@@ -114,20 +147,27 @@ std::string json_string(std::string_view value) {
 }
 
 const char* usage() {
-    return R"(pictor 0.1.0 — Anima P3 Turbo AIO inference
+    return R"(pictor 0.1.0 — Anima and FLUX.2-klein-4B inference
 
 Usage:
   pictor anima --prompt "anime landscape" [options]
+  pictor flux-klein --prompt "a red fox" [options]
 
-  --model PATH           AIO GGUF (default: models/Anima-P3-Turbo-AIO-Q4_K.gguf)
+  --model PATH          Anima AIO (default: models/Anima-P3-Turbo-AIO-Q4_K.gguf)
+  --diffusion-model PATH Klein diffusion GGUF
+  --text-encoder PATH    Klein Qwen3 GGUF (alias: --llm)
+  --vae PATH             Klein Flux2 VAE safetensors
+  --ref-image, -r PATH    Klein reference PNG/JPEG; repeat for up to 4 ordered images
+  --disable-auto-resize-ref-image  Keep reference size (multiples of 16 required)
+                        Klein paths default to files under models/flux2-klein-4b/
   --prompt, -p TEXT      Required positive prompt
   --negative-prompt TEXT Negative prompt (CFG 1 normally skips unconditional guidance)
-  --preset NAME          fast: 3/Spectrum; balanced: 8/Spectrum; quality: 16/no cache
-  --steps N              Override preset steps (1..1000)
-  --cache MODE           Override preset cache: none or spectrum
+  --preset NAME         Anima only: fast: 3/Spectrum; balanced: 8/Spectrum; quality: 16/no cache
+  --steps N             Steps (1..1000); Klein default: 4
+  --cache MODE          Anima: none or spectrum; Klein: none only
   --cfg-scale N          Guidance scale (default: 1)
   --width, -W N          Width in pixels (default: 512)
-  --height, -H N         Height in pixels (default: 768)
+  --height, -H N         Height (Anima default: 768; Klein default: 512)
   --seed N               Nonnegative seed or -1 for random (default)
   --count N              Generate 1..64 images using one loaded model; seeds increment
   --output, -o PATH      PNG path (default: output.png); count >1 adds -001, -002, ...
@@ -138,10 +178,14 @@ Usage:
   --help, -h            Show help
   --version              Show version
 
-Sampler: er_sde. Scheduler: smoothstep. Flash attention enabled.
+Anima: 512x768, er_sde/smoothstep, flash attention.
+Klein 4B distilled: 512x512, 4 steps, CFG 1, Euler/discrete, diffusion flash attention.
+Klein supports text-to-image and reference-image editing; output size stays explicit.
 Dimensions must be multiples of 16, from 64 to 4096; large images may exhaust memory.
 Each PNG has a JSON sidecar with effective settings, seed, and timings.
-Builds and --help do not need model weights. Fetch them with: zig build download-model
+Builds and --help do not need weights. Fetch with:
+  zig build download-model        (Anima)
+  zig build download-klein-model  (Klein, Qwen3, VAE)
 )";
 }
 

@@ -1,11 +1,19 @@
 #pragma once
 
 #include "pictor/anima.hpp"
+#include "pictor/flux_klein.hpp"
 #include <string_view>
 
 namespace pictor::cli {
 
+enum class Model { anima, flux_klein };
+
 struct Options {
+    Model model = Model::anima;
+    std::filesystem::path text_encoder;
+    std::filesystem::path vae;
+    std::vector<std::filesystem::path> reference_images;
+    bool auto_resize_reference = true;
     SessionOptions session;
     GenerationRequest request;
     std::filesystem::path output = "output.png";

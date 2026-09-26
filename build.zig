@@ -133,7 +133,7 @@ pub fn build(b: *std.Build) void {
     const core = b.addLibrary(.{
         .name = "pictor",
         .linkage = .dynamic,
-        .root_module = project.cpp(&.{ "src/anima.cpp", "src/options.cpp", "src/png.cpp", "src/logging.cpp", "src/c_api.cpp" }, false),
+        .root_module = project.cpp(&.{ "src/anima.cpp", "src/flux_klein.cpp", "src/session.cpp", "src/options.cpp", "src/png.cpp", "src/image.cpp", "src/logging.cpp", "src/c_api.cpp" }, false),
     });
     // The upstream C++ backend still throws. Only this small boundary catches it.
     project.cppSources(core.root_module, &.{"src/backend.cpp"}, true);
@@ -153,6 +153,7 @@ pub fn build(b: *std.Build) void {
         .{ "vendor/stable-diffusion.cpp/LICENSE", "stable-diffusion.cpp.txt" },
         .{ "vendor/stable-diffusion.cpp/ggml/LICENSE", "ggml.txt" },
         .{ "vendor/stable-diffusion.cpp/thirdparty/stb_image_write.h", "stb_image_write.h" },
+        .{ "vendor/stable-diffusion.cpp/thirdparty/stb_image.h", "stb_image.h" },
         .{ "vendor/stable-diffusion.cpp/thirdparty/zip.h", "zip.h" },
         .{ "vendor/stable-diffusion.cpp/thirdparty/miniz.h", "miniz.h" },
         .{ "vendor/stable-diffusion.cpp/thirdparty/LICENSE.darts_clone.txt", "darts_clone.txt" },
@@ -178,9 +179,27 @@ pub fn build(b: *std.Build) void {
     const cpp_test = project.executable("pictor_cpp_tests", &.{"tests/cpp_api_test.cpp"});
     cpp_test.root_module.addObjectFile(core.getEmittedBin());
     test_step.dependOn(&project.installedRun(cpp_test).step);
+    const image_test = project.executable("pictor_image_tests", &.{"tests/image_test.cpp"});
+    image_test.root_module.addObjectFile(core.getEmittedBin());
+    test_step.dependOn(&project.installedRun(image_test).step);
     const backend_test = project.executable("pictor_backend_tests", &.{"tests/backend_test.cpp"});
     project.cppSources(backend_test.root_module, &.{ "src/backend.cpp", "tests/backend_faults.cpp" }, true);
     test_step.dependOn(&b.addRunArtifact(backend_test).step);
+
+    const session_test = project.executable("pictor_session_tests", &.{ "tests/session_test.cpp", "tests/session_backend.cpp", "src/anima.cpp", "src/flux_klein.cpp", "src/session.cpp", "src/options.cpp", "src/logging.cpp", "src/c_api.cpp", "src/image.cpp", "src/png.cpp" });
+    project.cppSources(session_test.root_module, &.{"src/backend.cpp"}, true);
+    test_step.dependOn(&b.addRunArtifact(session_test).step);
+
+    const klein_smoke_exe = project.executable("pictor_klein_smoke", &.{"tests/klein_smoke.cpp"});
+    klein_smoke_exe.root_module.addObjectFile(core.getEmittedBin());
+    const klein_smoke = project.installedRun(klein_smoke_exe);
+    if (b.args) |args| klein_smoke.addArgs(args);
+    b.step("smoke-klein", "Klein resident/C++/C ABI inference checks (model/output directories after --)").dependOn(&klein_smoke.step);
+    const edit_smoke_exe = project.executable("pictor_klein_edit_smoke", &.{"tests/klein_edit_smoke.cpp"});
+    edit_smoke_exe.root_module.addObjectFile(core.getEmittedBin());
+    const edit_smoke = project.installedRun(edit_smoke_exe);
+    if (b.args) |args| edit_smoke.addArgs(args);
+    b.step("smoke-klein-edit", "Klein reference edit checks (model dir, reference PNG/JPEG, output dir after --)").dependOn(&edit_smoke.step);
 
     const c_smoke = project.cExecutable("pictor_c_smoke", "tests/c_api_smoke.c");
     c_smoke.root_module.addObjectFile(core.getEmittedBin());
@@ -196,6 +215,9 @@ pub fn build(b: *std.Build) void {
     zig_example.each_lib_rpath = false;
     const ffi_test = b.step("test-ffi", "Build and run Zig/Rust consumers without weights (requires rustc)");
     ffi_test.dependOn(&project.installedRun(zig_example).step);
+    const zig_klein_test = project.installedRun(zig_example);
+    zig_klein_test.addArg("--klein");
+    ffi_test.dependOn(&zig_klein_test.step);
     const rust = b.addSystemCommand(&.{ "rustc", "--edition=2024" });
     rust.addFileArg(b.path("examples/anima.rs"));
     rust.addArgs(&.{ b.fmt("-Lnative={s}", .{b.getInstallPath(.lib, "")}), b.fmt("-Clink-arg=-Wl,-rpath,{s}", .{if (sdk != null) "@loader_path/../lib" else "$ORIGIN/../lib"}), "-o" });
@@ -207,6 +229,10 @@ pub fn build(b: *std.Build) void {
     rust_run.step.dependOn(&install_rust.step);
     rust_run.addFileInput(rust_bin);
     ffi_test.dependOn(&rust_run.step);
+    const rust_klein_run = b.addSystemCommand(&.{ b.getInstallPath(.bin, "pictor_rust_example"), "--klein" });
+    rust_klein_run.step.dependOn(&install_rust.step);
+    rust_klein_run.addFileInput(rust_bin);
+    ffi_test.dependOn(&rust_klein_run.step);
     const help = b.addSystemCommand(&.{ b.getInstallPath(.bin, "pictor"), "--help" });
     help.step.dependOn(b.getInstallStep());
     help.addFileInput(exe.getEmittedBin());
@@ -230,6 +256,13 @@ pub fn build(b: *std.Build) void {
     missing.expectStdOutEqual("");
     missing.expectStdErrMatch("[pictor] [error] model file not found");
     test_step.dependOn(&missing.step);
+    const missing_ref = b.addSystemCommand(&.{ b.getInstallPath(.bin, "pictor"), "flux-klein", "-p", "winter", "--ref-image", "/nonexistent-pictor-reference.png", "--diffusion-model", "/nonexistent-model.gguf", "--output", b.pathFromRoot(".zig-cache/missing-reference-test.png") });
+    missing_ref.step.dependOn(b.getInstallStep());
+    missing_ref.addFileInput(exe.getEmittedBin());
+    missing_ref.expectExitCode(1);
+    missing_ref.expectStdOutEqual("");
+    missing_ref.expectStdErrMatch("[pictor] [error] image file not found or inaccessible");
+    test_step.dependOn(&missing_ref.step);
 
     const log_test = project.executable("pictor_logging_tests", &.{ "tests/logging_test.cpp", "src/logging.cpp" });
     const log_run = b.addRunArtifact(log_test);
@@ -264,6 +297,9 @@ pub fn build(b: *std.Build) void {
     const install_reference = b.addInstallArtifact(reference, .{});
     install_reference.step.dependOn(&install_backend.step);
     b.step("reference", "Build/install the pinned upstream CLI without the server").dependOn(&install_reference.step);
+
+    const klein_download = b.addSystemCommand(&.{ "bash", b.pathFromRoot("scripts/download-klein-model.sh") });
+    b.step("download-klein-model", "Download/verify Klein 4B Q4, Qwen3 4B Q4 and VAE (5.3 GB)").dependOn(&klein_download.step);
 
     const download = b.addSystemCommand(&.{ "bash", b.pathFromRoot("scripts/download-model.sh") });
     b.step("download-model", "Download and verify Anima P3 Turbo AIO Q4 (1.79 GB)").dependOn(&download.step);

@@ -1,6 +1,7 @@
 # pictor
 
-C++ inference library with a C ABI and CLI for **Anima P3 Turbo AIO Q4**, using a pinned
+C++ inference library with a C ABI and CLI for **Anima P3 Turbo AIO Q4** and
+**FLUX.2-klein-4B**, using a pinned
 stable-diffusion.cpp backend. Zig directly builds the C++ library, CLI, and tests
 and owns installation. Only the upstream sd.cpp/ggml dependency uses CMake/Ninja
 and the platform toolchain for its C++/Metal code. No Python runtime or HTTP server.
@@ -17,7 +18,7 @@ zig build run -- --help
 ```
 
 The first build initializes missing sd.cpp/ggml submodules and applies the
-bundled Metal patch. It may access GitHub. Subsequent builds use local sources;
+bundled Metal and progress-output patches. It may access GitHub. Subsequent builds use local sources;
 model weights are **not** downloaded by building or testing.
 
 Outputs are `zig-out/bin/pictor`, `zig-out/lib/libpictor.dylib`, and
@@ -71,6 +72,31 @@ are specific to it. Other Anima revisions, split weights, and arbitrary LoRAs
 are not covered by this release. Weights retain their upstream model license;
 see the model repository for terms. Weights are not committed to this repository.
 
+## FLUX.2-klein-4B
+
+Klein 4B distilled generation and reference editing use three split weights (about 5.3 GB total):
+Q4 diffusion model, Q4 Qwen3 text encoder, and Flux2 VAE.
+
+```sh
+zig build download-klein-model
+zig build run -- flux-klein --prompt "A red fox in a sunlit forest" \
+  --seed 666 --output outputs/fox.png
+zig build run -- flux-klein --ref-image outputs/fox.png \
+  --prompt "Change the scene to snowy winter. Keep the subject and composition." \
+  --seed 666 --output outputs/winter-fox.png
+```
+
+Defaults are 512×512, 4 steps, CFG 1, Euler/discrete, diffusion flash attention,
+and no cache. Custom paths use `--diffusion-model`, `--text-encoder` / `--llm`,
+and `--vae`. `--count` reuses loaded weights. C++ uses `FluxKleinSession`;
+the additive C ABI creation API works with the existing image and session calls.
+See [Klein usage, pinned weights and API examples](docs/klein.md).
+Repeat `--ref-image` / `-r` for up to four ordered PNG/JPEG inputs. Editing defaults
+to aspect-preserving reference resizing; output dimensions remain explicit.
+The same session supports both `generate()` and `edit()`. The additive C edit API
+accepts borrowed RGB8 buffers, usable from Zig/Rust without file I/O.
+Masked inpainting, 9B/base variants and MLX/SDNQ accelerations are outside this scope.
+
 ## Generate
 
 From the project directory:
@@ -120,8 +146,8 @@ be interrupted normally; the library does not promise cooperative cancellation.
 
 ## Library
 
-Both interfaces are installed: `pictor/anima.hpp` for C++, and `pictor/pictor.h`
-for C, Zig, Rust, or other C FFI consumers. Link `libpictor` and keep
+Both interfaces are installed: `pictor/anima.hpp` and `pictor/flux_klein.hpp` for
+C++, and `pictor/pictor.h` for C, Zig, Rust, or other C FFI consumers. Link `libpictor` and keep
 `libstable-diffusion` alongside it. Neither public interface exposes sd.cpp types.
 
 ### C++ (explicit errors, no exceptions)
@@ -225,7 +251,9 @@ C ABI consumers do not need C++ headers.
 ```sh
 zig build test                  # no weights: C/C++ API, backend errors, CLI, logging
 zig build test-ffi              # no weights: Zig/Rust consumers (requires rustc)
-zig build smoke-c               # weights: C callbacks, reuse, ownership, PNG
+zig build smoke-c               # Anima weights: C callbacks, reuse, ownership, PNG
+zig build smoke-klein           # Klein weights: resident C++/C ABI parity
+zig build smoke-klein-edit      # Klein weights + outputs/klein-reference.png: edit parity/reuse
 zig build smoke                 # weights required: repeated in-process generation
 zig build smoke -- /path/model.gguf outputs/smoke
 zig build reference             # optional upstream sd-cli, without the HTTP server
@@ -254,11 +282,13 @@ across versions or different GPU backends. See `docs/validation.md` for measured
 - sd.cpp: `90e87bc846f17059771efb8aaa31e9ef0cab6f78`
 - ggml: `404fcb9d7c96989569e68c9e7881ee3465a05c50`
 - Local patch: `patches/anima-ggml-metal-im2col3d-pad.patch`
+- Callback output patch: `patches/sd-model-progress-callback.patch` (suppresses
+  split-file loader separator newlines when a progress callback is installed)
 - spdlog 1.17.0: `79524ddd08a4ec981b7fea76afd08ee05f83755d`
 
-Preparation checks all three dependency revisions and whether the patch is already applied.
+Preparation checks all three dependency revisions and whether both patches are already applied.
 Mismatches fail explicitly; it does not reset modified checkouts. A modified ggml
-submodule after building is expected because the patch is kept separately.
+and sd.cpp submodule after building is expected because patches are kept separately.
 When upgrading, update the pins, check patch compatibility and API ownership,
 then rerun inference parity and resident-session tests.
 

@@ -62,6 +62,28 @@ int main() {
     require(cli::json_string("quote\"\n\\") == "\"quote\\\"\\u000a\\\\\"", "JSON escaping");
     require(parse({}).help && parse({"--help"}).help && parse({"anima", "--help"}).help, "help");
     require(parse({"--version"}).version, "version");
+    options = parse({"flux-klein", "-p", "a fox"});
+    require(options.model == cli::Model::flux_klein, "Klein command");
+    require(options.request.width == 512 && options.request.height == 512 && options.request.steps == 4 &&
+            options.request.cache == CacheMode::none && options.request.cfg_scale == 1, "Klein defaults");
+    options = parse({"flux-klein", "-p", "a fox", "--diffusion-model", "dit.gguf", "--text-encoder", "te.gguf", "--vae", "vae.safetensors", "--steps", "6", "--threads", "2"});
+    require(options.session.model_path == "dit.gguf" && options.text_encoder == "te.gguf" && options.vae == "vae.safetensors" && options.request.steps == 6 && options.session.threads == 2, "Klein split model flags");
+    require(parse({"flux-klein", "-p", "fox", "--llm", "alias.gguf"}).text_encoder == "alias.gguf", "LLM alias");
+    rejects({"flux-klein", "-p", "fox", "--model", "aio.gguf"});
+    rejects({"flux-klein", "-p", "fox", "--preset", "fast"});
+    rejects({"flux-klein", "-p", "fox", "--cache", "spectrum"});
+    rejects({"flux-klein", "-p", "fox", "--text-encoder", ""});
+    rejects({"flux-klein", "-p", "fox", "--vae", ""});
+    rejects({"anima", "-p", "cat", "--diffusion-model", "dit.gguf"});
+    rejects({"anima", "-p", "cat", "--vae", "vae.safetensors"});
+    require(parse({"flux-klein", "--help"}).help, "Klein help");
+    options = parse({"flux-klein", "-p", "winter", "-r", "one.png", "--ref-image", "two.jpg", "--disable-auto-resize-ref-image"});
+    require(options.reference_images.size() == 2 && options.reference_images[0] == "one.png" &&
+            options.reference_images[1] == "two.jpg" && !options.auto_resize_reference, "ordered reference flags");
+    rejects({"anima", "-p", "winter", "-r", "one.png"});
+    rejects({"flux-klein", "-p", "winter", "--ref-image", ""});
+    rejects({"flux-klein", "-p", "winter", "--disable-auto-resize-ref-image"});
+    rejects({"flux-klein", "-p", "winter", "-r", "1", "-r", "2", "-r", "3", "-r", "4", "-r", "5"});
     std::cout << "All option tests passed\n";
     return 0;
 }

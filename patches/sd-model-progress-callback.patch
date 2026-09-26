@@ -1,0 +1,6 @@
+diff --git a/src/model.cpp b/src/model.cpp
+--- a/src/model.cpp
++++ b/src/model.cpp
+@@ -987,1 +987,1 @@
+-        if (total_tensors_processed < total_tensors_to_process) {
++        if (total_tensors_processed < total_tensors_to_process && !sd_get_progress_callback()) {

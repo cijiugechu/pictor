@@ -23,7 +23,7 @@ Status create(const sd_ctx_params_t& params, sd_ctx_t*& output) noexcept {
     output = nullptr;
     return guard([&] {
         output = new_sd_ctx(&params);
-        return output ? Status{} : failure(ErrorCode::backend_error, "failed to load Anima model (enable verbose for backend logs)");
+        return output ? Status{} : failure(ErrorCode::backend_error, "failed to load model (enable verbose for backend logs)");
     });
 }
 
@@ -31,7 +31,7 @@ Status generate(sd_ctx_t* context, const sd_img_gen_params_t& params, sd_image_t
     output = nullptr;
     return guard([&] {
         output = generate_image(context, &params);
-        return output && output->data ? Status{} : failure(ErrorCode::backend_error, "Anima generation failed (enable verbose for backend logs)");
+        return output && output->data ? Status{} : failure(ErrorCode::backend_error, "image generation failed (enable verbose for backend logs)");
     });
 }
 

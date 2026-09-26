@@ -1,6 +1,8 @@
 #include "pictor/anima.hpp"
+#include "pictor/flux_klein.hpp"
 
 #include <cmath>
+#include <algorithm>
 #include <cerrno>
 #include <fcntl.h>
 #include <unistd.h>
@@ -18,6 +20,50 @@ GenerationRequest preset_request(Preset preset) {
         break;
     }
     return request;
+}
+
+GenerationRequest flux_klein_request() {
+    GenerationRequest request;
+    request.height = 512;
+    request.steps = 4;
+    request.cache = CacheMode::none;
+    return request;
+}
+
+Status validate_flux_klein_request(const GenerationRequest& request) noexcept {
+    if (const auto status = validate_request(request); !status) return status;
+    if (request.cache != CacheMode::none)
+        return failure(ErrorCode::invalid_argument, "Klein text-to-image currently requires cache=none");
+    return {};
+}
+
+Status validate_image_view(const ImageView& image) noexcept {
+    if (image.width < 1 || image.height < 1 || image.width > 4096 || image.height > 4096 ||
+        !image.pixels || image.pixels_len != static_cast<std::size_t>(image.width) * image.height * 3)
+        return failure(ErrorCode::invalid_argument, "reference must be tightly packed RGB8, with dimensions 1..4096 and matching buffer length");
+    return {};
+}
+
+Status validate_flux_klein_edit_request(const FluxKleinEditRequest& request) noexcept {
+    if (const auto status = validate_flux_klein_request(request.generation); !status) return status;
+    if (request.reference_images.empty() || request.reference_images.size() > 4)
+        return failure(ErrorCode::invalid_argument, "Klein editing requires 1..4 reference images");
+    for (const auto& image : request.reference_images) {
+        if (const auto status = validate_image_view(image); !status) return status;
+        if (!request.auto_resize) {
+            if (image.width % 16 || image.height % 16)
+                return failure(ErrorCode::invalid_argument, "reference dimensions must be multiples of 16 when auto-resize is disabled");
+        } else {
+            const double area = std::min(1024 * 1024, request.generation.width * request.generation.height);
+            const double width = std::sqrt(area * image.width / image.height);
+            const double height = width * image.height / image.width;
+            const double resized_width = std::round(width / 16) * 16;
+            const double resized_height = std::round(height / 16) * 16;
+            if (resized_width < 16 || resized_height < 16 || resized_width > 4096 || resized_height > 4096)
+                return failure(ErrorCode::invalid_argument, "reference aspect ratio produces unsupported resized dimensions");
+        }
+    }
+    return {};
 }
 
 Status validate_request(const GenerationRequest& request) noexcept {

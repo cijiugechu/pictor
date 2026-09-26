@@ -6,15 +6,22 @@
 
 - **stable-diffusion.cpp**, Copyright (c) 2023 leejet, MIT.
   Source and license: `vendor/stable-diffusion.cpp/LICENSE`.
+  Pictor additionally applies `patches/sd-model-progress-callback.patch` to keep
+  split-file loader output quiet when a caller installs a progress callback.
 - **ggml**, license in `vendor/stable-diffusion.cpp/ggml/LICENSE`.
 - **stb_image_write**, used from the pinned sd.cpp checkout. Its MIT/public-domain
   dual-license text is embedded in `vendor/stable-diffusion.cpp/thirdparty/stb_image_write.h`.
+- **stb_image**, PNG/JPEG decoding from the same pinned checkout; MIT/public-domain
+  dual-license text is in `vendor/stable-diffusion.cpp/thirdparty/stb_image.h`.
 - The Anima Metal patch is copied unchanged from
   `ultra-fast-image-gen/patches/anima-ggml-metal-im2col3d-pad.patch`, as are the
   original runtime pin and preset values. Project:
   https://github.com/newideas99/ultra-fast-image-gen.
 - Anima model weights are downloaded separately and retain their own license:
   https://huggingface.co/n-Arno/Anima-P3-Turbo-AIO-Q4_K.
+- Klein diffusion, Qwen3 text encoder and Flux2 VAE weights are also downloaded
+  separately. Their source repositories, pinned revisions and checksums are listed
+  in [docs/klein.md](docs/klein.md); they retain their respective source licenses.
 
 The native library links upstream dependencies. Preserve their license notices
 when distributing binaries. This file does not relicense any source or model.
