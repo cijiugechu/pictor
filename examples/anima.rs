@@ -78,7 +78,12 @@ struct EditOptions {
 unsafe extern "C" {
     fn pictor_abi_version() -> u32;
     fn pictor_session_options_init(out: *mut Options, size: usize, error: *mut Error) -> i32;
-    fn pictor_request_init(out: *mut Request, size: usize, preset: i32, error: *mut Error) -> i32;
+    fn pictor_anima_request_init(
+        out: *mut Request,
+        size: usize,
+        preset: i32,
+        error: *mut Error,
+    ) -> i32;
     fn pictor_flux_klein_options_init(
         out: *mut KleinOptions,
         size: usize,
@@ -92,9 +97,15 @@ unsafe extern "C" {
         error: *mut Error,
     ) -> i32;
     fn pictor_request_validate(request: *const Request, error: *mut Error) -> i32;
-    fn pictor_session_create(
+    fn pictor_anima_session_create_with_backend(
         options: *const Options,
+        backend: i32,
         out: *mut *mut Session,
+        error: *mut Error,
+    ) -> i32;
+    fn pictor_anima_session_backend(
+        session: *const Session,
+        output: *mut i32,
         error: *mut Error,
     ) -> i32;
     fn pictor_session_generate(
@@ -222,7 +233,7 @@ fn run() -> Result<(), String> {
             )?;
         } else {
             check(
-                pictor_request_init(&mut request, size_of::<Request>(), 0, &mut error),
+                pictor_anima_request_init(&mut request, size_of::<Request>(), 0, &mut error),
                 &error,
             )?;
         }
@@ -292,11 +303,17 @@ fn run() -> Result<(), String> {
                 &mut error,
             )
         } else {
-            pictor_session_create(&options, &mut session.0, &mut error)
+            pictor_anima_session_create_with_backend(&options, 0, &mut session.0, &mut error)
         };
         if model_arg.is_none() {
             if status != 1 || !session.0.is_null() || error.message[0] == 0 {
                 return Err("unexpected error result".into());
+            }
+            let mut selected = 2;
+            if pictor_anima_session_backend(ptr::null(), &mut selected, &mut error) != 1
+                || selected != 0
+            {
+                return Err("unexpected Anima backend result".into());
             }
             if pictor_flux_klein_session_set_hidden_state_compression(
                 ptr::null_mut(),

@@ -147,6 +147,7 @@ pub fn build(b: *std.Build) void {
         core.root_module.addIncludePath(b.path("vendor/stable-diffusion.cpp/src"));
         core.root_module.addIncludePath(b.path("vendor/stable-diffusion.cpp/ggml/include"));
         core.root_module.addCSourceFiles(.{ .files = &.{ "src/mlx/weights.cpp", "src/mlx/text_encoder.cpp", "src/mlx/transformer.cpp", "src/mlx/vae.cpp", "src/mlx/session.cpp" }, .flags = &.{ "-std=c++20", "-Wall", "-Wextra", "-nostdinc++", "-DSPDLOG_NO_EXCEPTIONS", "-DFMT_EXCEPTIONS=0" } });
+        core.root_module.addCSourceFiles(.{ .files = &.{ "src/anima_mlx/model.cpp", "src/anima_mlx/vae.cpp", "src/anima_mlx/tokenizer.cpp", "src/anima_mlx/session.cpp" }, .flags = &.{ "-std=c++20", "-nostdinc++", "-DGGML_MAX_NAME=128", "-Wno-format", "-Wno-inconsistent-missing-override", "-DSPDLOG_NO_EXCEPTIONS", "-DFMT_EXCEPTIONS=0" } });
         core.root_module.addCSourceFile(.{ .file = b.path("src/mlx/tokenizer.mm"), .flags = &.{ "-std=c++20", "-fobjc-arc", "-Wall", "-Wextra", "-nostdinc++" } });
         core.root_module.linkFramework("Foundation", .{});
         core.root_module.addObjectFile(b.path("build/mlx-native/lib/libmlx.dylib"));
@@ -172,6 +173,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
     b.installDirectory(.{ .source_dir = b.path("include/pictor"), .install_dir = .header, .install_subdir = "pictor" });
     b.installFile("licenses/mflux.txt", "share/pictor/licenses/mflux.txt");
+    b.installFile("licenses/anima-mlx.txt", "share/pictor/licenses/anima-mlx.txt");
     b.installFile("THIRD_PARTY_NOTICES.md", "share/pictor/THIRD_PARTY_NOTICES.md");
     const notices = [_][2][]const u8{
         .{ "vendor/stable-diffusion.cpp/LICENSE", "stable-diffusion.cpp.txt" },
@@ -238,6 +240,9 @@ pub fn build(b: *std.Build) void {
         const mlx_smoke_exe = project.executable("pictor_mlx_smoke", &.{"tests/mlx_smoke.cpp"});
         mlx_smoke_exe.root_module.addObjectFile(core.getEmittedBin());
         b.step("smoke-mlx", "Native MLX C/C++/batch/edit parity with pinned local weights").dependOn(&project.installedRun(mlx_smoke_exe).step);
+        const anima_smoke = project.executable("pictor_anima_mlx_smoke", &.{"tests/anima_mlx_smoke.cpp"});
+        anima_smoke.root_module.addObjectFile(core.getEmittedBin());
+        b.step("smoke-anima-mlx", "Anima MLX public API, batch parity and retained public weights").dependOn(&project.installedRun(anima_smoke).step);
         const probe = b.addExecutable(.{ .name = "pictor_mlx_probe", .root_module = project.cpp(&.{}, true) });
         probe.root_module.addCSourceFiles(.{ .files = &.{ "tests/mlx_probe.cpp", "src/mlx/weights.cpp", "src/mlx/text_encoder.cpp", "src/mlx/transformer.cpp", "src/mlx/vae.cpp" }, .flags = &.{ "-std=c++20", "-nostdinc++" } });
         probe.root_module.addCSourceFile(.{ .file = b.path("src/mlx/tokenizer.mm"), .flags = &.{ "-std=c++20", "-fobjc-arc", "-nostdinc++" } });
@@ -253,6 +258,33 @@ pub fn build(b: *std.Build) void {
         const probe_install = b.addInstallArtifact(probe, .{});
         probe_install.step.dependOn(b.getInstallStep());
         b.step("mlx-probe-build", "Build the model-dependent component parity probe").dependOn(&probe_install.step);
+        const anima_mlx = b.addExecutable(.{ .name = "pictor_anima_mlx_bench", .root_module = project.cpp(&.{"src/cli.cpp"}, false) });
+        anima_mlx.root_module.addCSourceFiles(.{ .files = &.{ "benchmarks/anima_mlx.cpp", "src/anima_mlx/model.cpp", "src/anima_mlx/vae.cpp", "src/anima_mlx/tokenizer.cpp", "src/mlx/weights.cpp" }, .flags = &.{ "-std=c++20", "-nostdinc++", "-DGGML_MAX_NAME=128", "-Wno-format", "-Wno-inconsistent-missing-override", "-DSPDLOG_NO_EXCEPTIONS", "-DFMT_EXCEPTIONS=0" } });
+        anima_mlx.root_module.addSystemIncludePath(b.path("build/mlx-native/include"));
+        anima_mlx.root_module.addIncludePath(b.path("vendor/stable-diffusion.cpp/src"));
+        anima_mlx.root_module.addIncludePath(b.path("vendor/stable-diffusion.cpp/ggml/include"));
+        anima_mlx.root_module.addObjectFile(b.path("build/mlx-native/lib/libmlx.dylib"));
+        anima_mlx.root_module.addObjectFile(backend_file);
+        anima_mlx.root_module.addObjectFile(core.getEmittedBin());
+        anima_mlx.root_module.addRPathSpecial("@loader_path/../lib");
+        anima_mlx.each_lib_rpath = false;
+        anima_mlx.step.dependOn(&core.step);
+        const anima_mlx_install = b.addInstallArtifact(anima_mlx, .{});
+        anima_mlx_install.step.dependOn(b.getInstallStep());
+        b.step("anima-mlx-build", "Build experimental native Anima MLX benchmark").dependOn(&anima_mlx_install.step);
+        const anima_oracle = b.addExecutable(.{ .name = "pictor_anima_ggml_probe", .root_module = project.cpp(&.{}, true) });
+        anima_oracle.root_module.addCSourceFiles(.{ .files = &.{"tests/anima_ggml_probe.cpp"}, .flags = &.{ "-std=c++20", "-nostdinc++", "-DGGML_MAX_NAME=128", "-Wno-format", "-Wno-inconsistent-missing-override" } });
+        anima_oracle.root_module.addSystemIncludePath(b.path("build/mlx-native/include"));
+        anima_oracle.root_module.addIncludePath(b.path("vendor/stable-diffusion.cpp/src"));
+        anima_oracle.root_module.addIncludePath(b.path("vendor/stable-diffusion.cpp/ggml/include"));
+        anima_oracle.root_module.addObjectFile(b.path("build/mlx-native/lib/libmlx.dylib"));
+        anima_oracle.root_module.addObjectFile(backend_file);
+        anima_oracle.root_module.addRPathSpecial("@loader_path/../lib");
+        anima_oracle.each_lib_rpath = false;
+        anima_oracle.step.dependOn(&core.step);
+        const oracle_install = b.addInstallArtifact(anima_oracle, .{});
+        oracle_install.step.dependOn(b.getInstallStep());
+        b.step("anima-ggml-probe-build", "Build independent P3 ggml stage oracle").dependOn(&oracle_install.step);
     }
     const klein_smoke_exe = project.executable("pictor_klein_smoke", &.{"tests/klein_smoke.cpp"});
     klein_smoke_exe.root_module.addObjectFile(core.getEmittedBin());
@@ -278,6 +310,11 @@ pub fn build(b: *std.Build) void {
     b.step("smoke-hs", "Klein HS exact-off, geometry, batch parity and 512px A/B (model/output dirs)").dependOn(&hs_smoke.step);
 
     const bench_exe = project.executable("pictor_klein_bench", &.{ "benchmarks/klein.cpp", "src/cli.cpp" });
+    const anima_bench = project.executable("pictor_anima_bench", &.{ "benchmarks/anima.cpp", "src/cli.cpp" });
+    anima_bench.root_module.addObjectFile(core.getEmittedBin());
+    const anima_install = b.addInstallArtifact(anima_bench, .{});
+    anima_install.step.dependOn(b.getInstallStep());
+    b.step("anima-benchmark-build", "Build resident Anima ggml benchmark").dependOn(&anima_install.step);
     bench_exe.root_module.addIncludePath(b.path("vendor/stable-diffusion.cpp/src"));
     bench_exe.root_module.addIncludePath(b.path("vendor/stable-diffusion.cpp/ggml/include"));
     bench_exe.root_module.addObjectFile(backend_file);
@@ -397,6 +434,10 @@ pub fn build(b: *std.Build) void {
     const klein_download = b.addSystemCommand(&.{ "bash", b.pathFromRoot(if (mlx_enabled) "scripts/download-mlx-model.sh" else "scripts/download-klein-model.sh") });
     b.step("download-klein-model", "Download/verify default Klein backend weights and Small Decoder").dependOn(&klein_download.step);
 
-    const download = b.addSystemCommand(&.{ "bash", b.pathFromRoot("scripts/download-model.sh") });
-    b.step("download-model", "Download and verify Anima P3 Turbo AIO Q4 (1.79 GB)").dependOn(&download.step);
+    const download = b.addSystemCommand(&.{ "bash", b.pathFromRoot(if (mlx_enabled) "scripts/prepare-anima-model.sh" else "scripts/download-model.sh") });
+    if (mlx_enabled) {
+        download.addFileArg(backend_file);
+        download.step.dependOn(&backend_build.step);
+    }
+    b.step("download-model", "Prepare/verify the default Anima backend weights (MLX: dequantized P3 BF16)").dependOn(&download.step);
 }

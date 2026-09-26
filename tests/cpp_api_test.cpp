@@ -8,6 +8,9 @@
 int main() {
     using namespace pictor;
     std::unique_ptr<AnimaSession> session;
+    CHECK(!AnimaSession::create({__FILE__}, static_cast<AnimaBackend>(99), session) && !session);
+    CHECK(!AnimaSession::create({"/nonexistent-pictor-mlx"}, AnimaBackend::mlx, session) && !session);
+    CHECK(anima_request().cache == CacheMode::none && anima_request(Preset::fast).steps == 3);
     auto status = AnimaSession::create({"/nonexistent-pictor-cpp-model.gguf"}, session);
     CHECK(status.code == ErrorCode::invalid_argument && !session);
     auto request = preset_request(Preset::fast);

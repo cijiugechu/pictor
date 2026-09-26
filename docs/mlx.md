@@ -1,7 +1,8 @@
 # Native MLX Klein backend
 
 Apple Silicon Metal builds now default the Klein CLI to **native MLX + Small
-Decoder**. Anima keeps sd.cpp. Klein's C++ session and C ABI expose the same
+Decoder**. Anima also defaults to native MLX; see [Anima's setup/API guide](anima-mlx.md).
+Klein's C++ session and C ABI expose the same
 text, reference-edit and batch operations with either backend. Inference never
 starts Python: libpictor links libmlx directly.
 

@@ -13,6 +13,15 @@ int main(void) {
     pictor_session_options options;
     pictor_session* session = NULL;
     pictor_image* image = NULL;
+    pictor_anima_backend anima_backend = PICTOR_ANIMA_BACKEND_MLX;
+    CHECK(pictor_anima_session_backend(NULL, &anima_backend, &error) == PICTOR_INVALID_ARGUMENT);
+    CHECK(anima_backend == PICTOR_ANIMA_BACKEND_AUTO);
+    CHECK(pictor_anima_session_create_with_backend(NULL, (pictor_anima_backend)99, &session, &error) == PICTOR_INVALID_ARGUMENT && !session);
+    CHECK(pictor_anima_request_init(&request, sizeof(request), PICTOR_PRESET_FAST, &error) == PICTOR_OK);
+    CHECK(request.steps == 3 && request.cache == PICTOR_CACHE_NONE);
+    CHECK(pictor_anima_request_init(NULL, sizeof(request), PICTOR_PRESET_FAST, &error) == PICTOR_INVALID_ARGUMENT);
+    CHECK(pictor_anima_request_init(&request, sizeof(request)-1, PICTOR_PRESET_FAST, &error) == PICTOR_INVALID_ARGUMENT);
+    CHECK(pictor_anima_request_init(&request, sizeof(request), 99, &error) == PICTOR_INVALID_ARGUMENT);
     CHECK(pictor_flux_klein_session_set_hidden_state_compression(NULL, 1, &error) == PICTOR_INVALID_ARGUMENT);
     pictor_klein_backend selected = PICTOR_KLEIN_BACKEND_MLX;
     CHECK(pictor_flux_klein_session_backend(NULL, &selected, &error) == PICTOR_INVALID_ARGUMENT);

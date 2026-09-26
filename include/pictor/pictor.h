@@ -43,6 +43,12 @@ typedef struct pictor_session_options {
     uint32_t verbose; /* 0 or 1 */
 } pictor_session_options;
 
+typedef enum pictor_anima_backend {
+    PICTOR_ANIMA_BACKEND_AUTO = 0,
+    PICTOR_ANIMA_BACKEND_GGML = 1,
+    PICTOR_ANIMA_BACKEND_MLX = 2
+} pictor_anima_backend;
+
 /* Additive ABI v1 extension for Klein 4B distilled text-to-image.
  * Original Anima options and request layouts remain unchanged. */
 typedef enum pictor_klein_backend {
@@ -118,6 +124,15 @@ typedef void (*pictor_batch_progress_callback)(int32_t image_index, int32_t imag
 uint32_t pictor_abi_version(void) PICTOR_NOEXCEPT;
 pictor_status pictor_session_options_init(pictor_session_options* output, size_t size, pictor_error* error) PICTOR_NOEXCEPT;
 pictor_status pictor_request_init(pictor_request* output, size_t size, int32_t preset, pictor_error* error) PICTOR_NOEXCEPT;
+/* Uncached P3 presets for MLX; original request_init keeps ggml/Spectrum defaults. */
+pictor_status pictor_anima_request_init(pictor_request* output, size_t size, int32_t preset, pictor_error* error) PICTOR_NOEXCEPT;
+/* Additive ABI v1: directories select MLX/BF16, files select ggml. Public MLX
+ * directories prefer transformer-int4 when present, otherwise transformer-bf16.
+ * MLX requires cache=NONE; explicit Spectrum is rejected. */
+pictor_status pictor_anima_session_create_with_backend(const pictor_session_options* options,
+    pictor_anima_backend backend, pictor_session** output, pictor_error* error) PICTOR_NOEXCEPT;
+pictor_status pictor_anima_session_backend(const pictor_session* session,
+    pictor_anima_backend* output, pictor_error* error) PICTOR_NOEXCEPT;
 /* Validates common fields. Session-specific restrictions are checked by generate. */
 pictor_status pictor_request_validate(const pictor_request* request, pictor_error* error) PICTOR_NOEXCEPT;
 

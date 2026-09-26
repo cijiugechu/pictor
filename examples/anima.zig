@@ -17,7 +17,7 @@ fn progress(step: i32, steps: i32, _: f32, userdata: ?*anyopaque) callconv(.c) v
 }
 
 // With no arguments, checks linking and errors without weights.
-// With a model path, generates outputs/zig.png through the C ABI.
+// With an Anima GGUF path or MLX directory, generates outputs/zig.png through the C ABI.
 // --mlx [MLX model-directory] uses native MLX and the default Small Decoder.
 // --klein [GGUF model-directory] [reference.png] selects Klein generation/editing.
 pub fn main(init: std.process.Init) !void {
@@ -35,7 +35,7 @@ pub fn main(init: std.process.Init) !void {
     if (klein) {
         try check(c.pictor_flux_klein_request_init(&request, @sizeOf(@TypeOf(request)), &err), &err);
     } else {
-        try check(c.pictor_request_init(&request, @sizeOf(@TypeOf(request)), c.PICTOR_PRESET_FAST, &err), &err);
+        try check(c.pictor_anima_request_init(&request, @sizeOf(@TypeOf(request)), c.PICTOR_PRESET_FAST, &err), &err);
     }
     request.prompt = "masterpiece, best quality, anime landscape, a small cottage by a lake, mountains, blue sky, no people";
     if (reference_path != null) request.prompt = "Change the scene to snowy winter. Keep the subject and composition.";
@@ -56,10 +56,13 @@ pub fn main(init: std.process.Init) !void {
         paths.text_encoder_path = (try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ directory, if (mlx) "text_encoder" else "Qwen3-4B-Q4_K_M.gguf" }, 0)).ptr;
         paths.vae_path = if (mlx) "models/flux2-klein-4b/full_encoder_small_decoder.safetensors" else (try std.fmt.allocPrintSentinel(allocator, "{s}/full_encoder_small_decoder.safetensors", .{directory}, 0)).ptr;
         break :blk c.pictor_flux_klein_session_create_with_backend(&paths, if (mlx) c.PICTOR_KLEIN_BACKEND_MLX else c.PICTOR_KLEIN_BACKEND_GGML, &session, &err);
-    } else c.pictor_session_create(&options, &session, &err);
+    } else c.pictor_anima_session_create_with_backend(&options, c.PICTOR_ANIMA_BACKEND_AUTO, &session, &err);
     if (!has_model) {
         if (status != c.PICTOR_INVALID_ARGUMENT or session != null or err.message[0] == 0)
             return error.UnexpectedResult;
+        var selected: c.pictor_anima_backend = c.PICTOR_ANIMA_BACKEND_MLX;
+        if (c.pictor_anima_session_backend(null, &selected, &err) != c.PICTOR_INVALID_ARGUMENT or selected != c.PICTOR_ANIMA_BACKEND_AUTO)
+            return error.UnexpectedBackendResult;
         if (c.pictor_flux_klein_session_set_hidden_state_compression(null, 1, &err) != c.PICTOR_INVALID_ARGUMENT)
             return error.UnexpectedHsResult;
         var images = [_]?*c.pictor_image{ null, null };

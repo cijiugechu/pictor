@@ -39,3 +39,13 @@ license is installed alongside pictor. The C++ Qwen3, Klein and Flux2 VAE
 implementations in `src/mlx/` are adapted from MFLUX 0.20.0 (Filip Strand, MIT license), with native tokenization, reference preparation and
 pictor sampling integration. See `licenses/mflux.txt`. Python/MFLUX is used only
 for reference tests; it is not loaded by the inference library.
+
+## Anima MLX reference port
+
+The native Anima implementation in `src/anima_mlx/` and its weight
+mapping follow [xocialize/anima-mlx](https://github.com/xocialize/anima-mlx), commit
+`2338e281ee533568db558963f6e3da064eb60ff0`. Port code copyright (c) 2026 xocialize,
+MIT; the full notice is retained in `licenses/anima-mlx.txt`. Model weights retain
+their own upstream terms; their pinned provenance is in
+`benchmarks/anima-mlx-model.json`. P3 conversion uses the separately attributed
+ggml implementation and does not change the model's license.

@@ -31,7 +31,7 @@ pictor::Status write_metadata(const std::filesystem::path& path, const pictor::c
         << "  \"model\": " << quote(model.string()) << ",\n";
     if (klein) out << "  \"text_encoder\": " << quote(text_encoder.string()) << ",\n"
                    << "  \"vae\": " << quote(vae.string()) << ",\n";
-    out << "  \"backend\": " << quote(klein && options.backend == pictor::KleinBackend::mlx ? "mlx" : "ggml") << ",\n";
+    out << "  \"backend\": " << quote((klein ? options.backend == pictor::KleinBackend::mlx : options.anima_backend == pictor::AnimaBackend::mlx) ? "mlx" : "ggml") << ",\n";
     out << "  \"mode\": " << quote(options.reference_images.empty() ? "text-to-image" : "reference-edit") << ",\n";
     if (!options.reference_images.empty()) {
         out << "  \"reference_images\": [";
@@ -114,11 +114,12 @@ int main(int argc, char** argv) {
     std::unique_ptr<pictor::AnimaSession> anima;
     std::unique_ptr<pictor::FluxKleinSession> klein;
     const auto created = options.model == pictor::cli::Model::anima
-        ? pictor::AnimaSession::create(options.session, anima)
+        ? pictor::AnimaSession::create(options.session, options.anima_backend, anima)
         : pictor::FluxKleinSession::create({options.session.model_path, options.text_encoder, options.vae,
                                           options.session.threads, options.session.verbose}, options.backend, klein);
     if (!created) return report(created);
     if (klein) options.backend = klein->backend();
+    if (anima) options.anima_backend = anima->backend();
     if (klein)
         if (const auto status = klein->set_hidden_state_compression(options.hidden_state_compression); !status) return report(status);
     const auto load_seconds = anima ? anima->load_seconds() : klein->load_seconds();

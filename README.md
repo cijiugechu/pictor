@@ -1,8 +1,9 @@
 # pictor
 
 C++ inference library with a C ABI and CLI for **Anima P3 Turbo AIO Q4** and
-**FLUX.2-klein-4B**. Apple Silicon defaults to native MLX for Klein and a pinned
-stable-diffusion.cpp backend for Anima; Klein also supports explicit ggml selection. Zig directly builds the C++ library, CLI, and tests
+**FLUX.2-klein-4B**. Apple Silicon defaults to native MLX for both models;
+both retain explicit selection of the pinned stable-diffusion.cpp/ggml backend.
+Zig directly builds the C++ library, CLI, and tests
 and owns installation. Only the upstream sd.cpp/ggml dependency uses CMake/Ninja
 and the platform toolchain for its C++/Metal code. No Python runtime or HTTP server.
 
@@ -50,16 +51,20 @@ CUDA, Windows packaging, and cross compilation are outside this first version.
 
 ## Model
 
-Download the original project's exact checkpoint, or supply an existing file:
+Prepare the default Anima weights (or supply an existing GGUF/MLX directory):
 
 ```sh
 zig build download-model
-# Optional custom location:
+# GGUF only, including an optional custom location:
 bash scripts/download-model.sh /absolute/path/Anima-P3-Turbo-AIO-Q4_K.gguf
 ```
 
-The download is **1,792,252,512 bytes** (1.79 GB / 1.67 GiB), resumes via a `.part`
-file, and verifies SHA-256 before renaming. It is independent of the build.
+The source download is **1,792,252,512 bytes** (1.79 GB / 1.67 GiB), resumes via a
+`.part` file, and verifies SHA-256 before renaming. MLX builds then stream-convert
+it to **5.14 GiB BF16** under `models/anima-p3-mlx-bf16`, verifying/reusing a complete
+existing conversion. CPU/no-MLX builds prepare only the GGUF. Weight preparation
+is explicit, separate from ordinary builds/inference; Python is needed only for
+preparation. See [Anima MLX setup and API](docs/anima-mlx.md).
 
 | Item | Pinned value |
 | --- | --- |
@@ -69,8 +74,9 @@ file, and verifies SHA-256 before renaming. It is independent of the build.
 | SHA-256 | `3290dc9abad9cf98cf1b39b491a464bd4e7bba200ed508dcf0a7e9cd8fdb9168` |
 
 This AIO contains DiT, text encoder, VAE, and merged Turbo LoRA. The presets below
-are specific to it. Other Anima revisions, split weights, and arbitrary LoRAs
-are not covered by this release. Weights retain their upstream model license;
+are specific to it. The pinned public `xocialize/anima-mlx` checkpoint is also
+supported as an optional model directory with its own sampling recipe. Arbitrary
+Anima revisions and LoRAs are not covered. Weights retain their upstream model license;
 see the model repository for terms. Weights are not committed to this repository.
 
 ## FLUX.2-klein-4B
@@ -111,18 +117,22 @@ zig-out/bin/pictor anima \
   --preset balanced --seed 666 --output outputs/cottage.png
 ```
 
-Defaults: 512×768, CFG 1, `er_sde`, `smoothstep`, flash attention. `--model` defaults
-to `models/Anima-P3-Turbo-AIO-Q4_K.gguf` relative to the current directory.
+Defaults: 512×768, CFG 1, `er_sde`, `smoothstep`, flash attention. On MLX-enabled
+Apple Silicon builds, `--model` defaults to `models/anima-p3-mlx-bf16` with BF16
+compute. `--backend ggml` (also the CPU/no-MLX default) selects
+`models/Anima-P3-Turbo-AIO-Q4_K.gguf`. Paths are relative to the current directory.
+An explicit GGUF path keeps the ggml route; a weights directory selects MLX.
 
-| Preset | Steps | Cache |
-| --- | ---: | --- |
-| `fast` | 3 | Spectrum |
-| `balanced` (default) | 8 | Spectrum |
-| `quality` | 16 | none |
+| Preset | Steps | MLX cache | ggml cache |
+| --- | ---: | --- | --- |
+| `fast` | 3 | none | Spectrum |
+| `balanced` (default) | 8 | none | Spectrum |
+| `quality` | 16 | none | none |
 
 `--steps` and `--cache` override presets regardless of argument order. Spectrum
-is an approximation; use `--cache none` for comparisons. CFG 1 normally skips
-the negative/unconditional pass. `--vae-tiling` can reduce decoding memory.
+is an approximation supported only by ggml; MLX rejects explicit Spectrum.
+CFG 1 skips the negative/unconditional pass. `--vae-tiling` can reduce decoding
+memory; native MLX uses approximate overlapping tiles and keeps tiling off by default.
 
 Generate multiple images with one model load and shared conditioning per batch:
 
@@ -171,9 +181,9 @@ C++, and `pictor/pictor.h` for C, Zig, Rust, or other C FFI consumers. Link `lib
 
 int main() {
     std::unique_ptr<pictor::AnimaSession> session;
-    auto status = pictor::AnimaSession::create({"/absolute/path/model.gguf"}, session);
+    auto status = pictor::AnimaSession::create({"models/anima-p3-mlx-bf16"}, session);
     if (!status) { std::fprintf(stderr, "%s\n", status.message); return 1; }
-    auto request = pictor::preset_request(pictor::Preset::balanced);
+    auto request = pictor::anima_request(pictor::Preset::balanced);
     request.prompt = "anime landscape, a cottage by a lake";
     request.seed = 666;
     pictor::Image image;
@@ -191,6 +201,14 @@ cannot return errors. This updates the earlier throwing API: callers must migrat
 construction to `create`, pass an output `Image` to `generate`, and check statuses.
 The C++ session/request/image types remain available. Callbacks are now a
 `noexcept` function pointer plus `void* userdata`, instead of `std::function`.
+
+Anima adds `create(options, AnimaBackend::mlx/ggml/automatic, output)` and
+`session->backend()` without changing `SessionOptions`. The original create
+overload selects directories/files automatically. `anima_request()` gives uncached
+P3 presets for MLX; legacy `preset_request()` retains its ggml/Spectrum behavior.
+Equivalent additive C APIs are `pictor_anima_session_create_with_backend`,
+`pictor_anima_session_backend` and `pictor_anima_request_init`; all ABI v1 layouts
+remain unchanged. See [complete C/C++ examples](docs/anima-mlx.md).
 
 For a batch, both session types expose `generate_batch(request, count, result)`;
 Klein also exposes `edit_batch(edit_request, count, result)`. Single-image methods
@@ -274,8 +292,9 @@ zig build test-ffi              # builds/runs Zig and Rust consumers; needs rust
 zig-out/bin/pictor_zig_example
 zig-out/bin/pictor_rust_example
 # A model argument runs real inference and writes outputs/zig.png or rust.png:
-zig-out/bin/pictor_zig_example models/Anima-P3-Turbo-AIO-Q4_K.gguf
-zig-out/bin/pictor_rust_example models/Anima-P3-Turbo-AIO-Q4_K.gguf
+zig-out/bin/pictor_zig_example models/anima-p3-mlx-bf16
+zig-out/bin/pictor_rust_example models/anima-p3-mlx-bf16
+# Passing models/Anima-P3-Turbo-AIO-Q4_K.gguf instead selects ggml.
 ```
 
 Standalone C linking on macOS (the test itself needs no weights):
@@ -295,6 +314,14 @@ C ABI consumers do not need C++ headers.
 
 For Small Decoder, resident timing, Metal System Trace and MLX comparison experiments,
 see [the reproducible benchmark guide](docs/benchmarking.md).
+
+Anima's native MLX backend supports public xocialize weights or locally
+dequantized P3 Turbo weights. Conversion, stage parity and resident
+comparison commands are in [the Anima MLX experiment guide](docs/anima-mlx-experiments.md).
+On the tested M4/32 GiB host, P3 BF16 MLX reduced 512x768 resident generation from
+51.47s to 25.14s at three steps; the public model remains a slower detail/style option.
+The measured P3 BF16 route is now integrated into the public API and is the
+Apple Silicon CLI default; experiment targets remain for numerical comparisons.
 
 ### Optional Klein hidden-state compression
 
@@ -319,6 +346,7 @@ session/concurrency semantics and quality limitations.
 zig build test                  # no weights: C/C++ API, backend errors, CLI, logging
 zig build test-ffi              # no weights: Zig/Rust consumers (requires rustc)
 zig build smoke-c               # Anima weights: C callbacks, reuse, ownership, PNG
+zig build smoke-anima-mlx        # Native Anima public API/batch/CFG/tiling and both checkpoints
 zig build smoke-klein           # Klein weights: resident C++/C ABI parity
 zig build smoke-klein-edit      # Klein weights + outputs/klein-reference.png: edit parity/reuse
 zig build smoke-hs              # Klein weights: HS geometry, toggling and visual A/B

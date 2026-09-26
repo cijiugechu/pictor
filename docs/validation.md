@@ -1,5 +1,29 @@
 # Initial validation — 2026-09-26
 
+## Native Anima public integration
+
+- Additive C++/C backend selection/query and uncached request initialization
+  preserve existing option/request layouts and explicit GGUF behavior. MLX-enabled
+  Apple Silicon CLI builds now default to converted P3 BF16.
+- Metal tests/FFI + Anima real-model smoke passed 74/74 build steps. CPU/no-MLX
+  tests/FFI passed 60/60; updated Zig/Rust imports passed 31/31 CPU steps.
+  Klein's actual C/C++ batch/edit smoke plus FFI passed 42/42. Final Anima smoke
+  with explicit single/C batch callback checks passed 29/29.
+- Anima checks cover batch/single and concurrent-call exact RGB, consecutive/random
+  seeds, callbacks, C/C++ pixels, CFG0/CFG2, tiled edge sizes, malformed weights/
+  UTF-8, recovery, image lifetime and the retained public INT4 checkpoint.
+- Default 512×768/8-step CLI output is **RGB-exact** against
+  `outputs/anima-mlx/p3-512-balanced-bf16/image-001.png`. Explicit ggml 256px/3-step
+  output is **RGB-exact** against `outputs/anima-mlx/ggml-256-probe/image.png`.
+  New PNGs/sidecars are under `outputs/anima-api/`. The 512px integration call took
+  72.33s under uncontrolled load: a functional observation, not a new benchmark.
+- `zig build download-model` verified/reused the source and BF16 export. Corrupt
+  conversion data is rejected. A relocated install ran with `PATH=/usr/bin:/bin`
+  without Python; dyld logs confirmed all project dylibs loaded from that install.
+  CPU builds reject explicit MLX with a clear error.
+- [Setup and API examples](anima-mlx.md) cover the new default, legacy preset
+  migration, explicit ggml selection and approximate tiled decode.
+
 ## Follow-up: Klein reference-image editing
 
 The same three Klein weight files now support reference editing, with the full
@@ -74,7 +98,7 @@ verified, on the same Apple M4 / 32 GiB host.
   original upstream baseline exactly (0 changed channels). Load was 3.408 s;
   generation was 59.697 s and 49.674 s.
 - Existing, previously compiled C11 and C++17 clients run against the new
-  library. The old C ABI layouts/signatures and Anima defaults remain intact;
+  library. At that stage, the old C ABI layouts/signatures and Anima defaults remained intact;
   new Klein C and C++ symbols are exported. Zig/Rust Klein examples were checked
   without weights; real Klein FFI inference was exercised through the C ABI
   smoke test.

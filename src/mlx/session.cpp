@@ -2,6 +2,7 @@
 #include "inference_lock.hpp"
 #include "logging.hpp"
 #include "mlx_session.hpp"
+#include "runtime.hpp"
 #include "rng_philox.hpp"
 #include "stable-diffusion.h"
 #include "text_encoder.hpp"
@@ -18,37 +19,6 @@ namespace {
 using Clock = std::chrono::steady_clock;
 double elapsed(Clock::time_point start) {
     return std::chrono::duration<double>(Clock::now() - start).count();
-}
-struct RuntimeScope {
-    mx::Device previous = mx::default_device();
-    RuntimeScope() { mx::set_default_device(mx::Device(mx::Device::gpu)); }
-    ~RuntimeScope() { mx::set_default_device(previous); }
-};
-struct TokenizerLogScope {
-    TokenizerLogScope() {
-        sd_set_log_callback(
-            [](sd_log_level_t level, const char *text, void *) {
-                if (level >= SD_LOG_WARN && text)
-                    logging::mlx().warn("{}", text);
-            },
-            nullptr);
-    }
-    ~TokenizerLogScope() { sd_set_log_callback(nullptr, nullptr); }
-};
-Status exception_status() noexcept {
-    try {
-        throw;
-    } catch (const std::bad_alloc &) {
-        return failure(ErrorCode::out_of_memory, "MLX allocation failed");
-    } catch (const std::filesystem::filesystem_error &e) {
-        return failure(ErrorCode::io_error, e.what());
-    } catch (const std::invalid_argument &e) {
-        return failure(ErrorCode::invalid_argument, e.what());
-    } catch (const std::exception &e) {
-        return failure(ErrorCode::backend_error, e.what());
-    } catch (...) {
-        return failure(ErrorCode::backend_error, "unknown MLX runtime failure");
-    }
 }
 array reference_pixels(const ImageView &ref, const GenerationRequest &r, bool resize) {
     int w = ref.width, h = ref.height;

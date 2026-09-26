@@ -49,7 +49,7 @@ Status parse(const std::vector<std::string>& args, Options& output) noexcept {
         return failure(ErrorCode::invalid_argument, "expected 'anima' or 'flux-klein' (see --help)");
     }
 
-    bool diffusion_given = false, text_given = false;
+    bool diffusion_given = false, text_given = false, anima_model_given = false;
     Preset preset = Preset::balanced;
     std::optional<int> steps;
     std::optional<CacheMode> cache;
@@ -72,14 +72,14 @@ Status parse(const std::vector<std::string>& args, Options& output) noexcept {
         const auto& value = args[++i];
         Status status;
         if (arg == "--backend") {
-            if (options.model != Model::flux_klein) return failure(ErrorCode::invalid_argument, "--backend requires flux-klein");
-            if (value == "auto") options.backend = KleinBackend::automatic;
-            else if (value == "ggml") options.backend = KleinBackend::ggml;
-            else if (value == "mlx") options.backend = KleinBackend::mlx;
+            if (value == "auto") { options.backend = KleinBackend::automatic; options.anima_backend = AnimaBackend::automatic; }
+            else if (value == "ggml") { options.backend = KleinBackend::ggml; options.anima_backend = AnimaBackend::ggml; }
+            else if (value == "mlx") { options.backend = KleinBackend::mlx; options.anima_backend = AnimaBackend::mlx; }
             else return failure(ErrorCode::invalid_argument, "backend must be auto, ggml or mlx");
         } else if (arg == "--model") {
             if (options.model != Model::anima) return failure(ErrorCode::invalid_argument, "Klein uses --diffusion-model, --text-encoder and --vae");
             options.session.model_path = value;
+            anima_model_given = true;
         } else if (arg == "--diffusion-model" || arg == "--text-encoder" || arg == "--llm" || arg == "--vae") {
             if (options.model != Model::flux_klein) return failure(ErrorCode::invalid_argument, arg + " is only supported by flux-klein");
             if (arg == "--diffusion-model") { options.session.model_path = value; diffusion_given = true; }
@@ -137,9 +137,26 @@ Status parse(const std::vector<std::string>& args, Options& output) noexcept {
         if (selected == KleinBackend::mlx && options.hidden_state_compression)
             return failure(ErrorCode::invalid_argument, "--hs-compression requires --backend ggml");
     }
-    const auto defaults = options.model == Model::anima ? preset_request(preset) : flux_klein_request();
+    if (options.model == Model::anima) {
+        auto selected = options.anima_backend;
+        if (selected == AnimaBackend::automatic) {
+            std::error_code ec;
+            if (anima_model_given) selected = std::filesystem::is_directory(options.session.model_path, ec) ? AnimaBackend::mlx : AnimaBackend::ggml;
+#ifdef PICTOR_DEFAULT_MLX
+            else selected = AnimaBackend::mlx;
+#else
+            else selected = AnimaBackend::ggml;
+#endif
+        }
+        if (!anima_model_given && selected == AnimaBackend::mlx) options.session.model_path = "models/anima-p3-mlx-bf16";
+        options.anima_backend = selected;
+    }
+    const auto defaults = options.model == Model::anima
+        ? (options.anima_backend == AnimaBackend::mlx ? anima_request(preset) : preset_request(preset)) : flux_klein_request();
     options.request.steps = steps.value_or(defaults.steps);
     options.request.cache = cache.value_or(defaults.cache);
+    if (options.model == Model::anima && options.anima_backend == AnimaBackend::mlx && options.request.cache != CacheMode::none)
+        return failure(ErrorCode::invalid_argument, "Anima MLX requires --cache none; Spectrum requires --backend ggml");
     const auto validation = options.model == Model::anima ? validate_request(options.request) : validate_flux_klein_request(options.request);
     if (!validation) return validation;
     if (!options.auto_resize_reference && options.reference_images.empty())
@@ -185,8 +202,9 @@ Usage:
   pictor anima --prompt "anime landscape" [options]
   pictor flux-klein --prompt "a red fox" [options]
 
-  --model PATH          Anima AIO (default: models/Anima-P3-Turbo-AIO-Q4_K.gguf)
-  --backend MODE        Klein: auto (default), mlx, ggml; Apple Silicon defaults to MLX
+  --model PATH          Anima GGUF or MLX directory (MLX default: models/anima-p3-mlx-bf16)
+  --backend MODE        auto (default), mlx, ggml; MLX-enabled builds default both models to MLX
+                        Anima ggml default: models/Anima-P3-Turbo-AIO-Q4_K.gguf
   --diffusion-model PATH Klein diffusion GGUF or MLX safetensors directory
   --text-encoder PATH    Klein Qwen3 GGUF or MLX directory (alias: --llm)
   --vae PATH             Klein VAE (default: full_encoder_small_decoder.safetensors)
@@ -195,9 +213,9 @@ Usage:
                         MLX weights: models/mlx-flux2-klein-4b-4bit/; VAE: models/flux2-klein-4b/
   --prompt, -p TEXT      Required positive prompt
   --negative-prompt TEXT Negative prompt (CFG 1 normally skips unconditional guidance)
-  --preset NAME         Anima only: fast: 3/Spectrum; balanced: 8/Spectrum; quality: 16/no cache
+  --preset NAME         Anima: fast 3, balanced 8, quality 16 steps; MLX uses no cache
   --steps N             Steps (1..1000); Klein default: 4
-  --cache MODE          Anima: none or spectrum; Klein: none only
+  --cache MODE          none or spectrum (Spectrum: Anima ggml only; fast/balanced default)
   --cfg-scale N          Guidance scale (default: 1)
   --width, -W N          Width in pixels (default: 512)
   --height, -H N         Height (Anima default: 768; Klein default: 512)

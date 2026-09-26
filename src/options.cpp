@@ -22,6 +22,12 @@ GenerationRequest preset_request(Preset preset) {
     return request;
 }
 
+GenerationRequest anima_request(Preset preset) {
+    auto request = preset_request(preset);
+    request.cache = CacheMode::none;
+    return request;
+}
+
 GenerationRequest flux_klein_request() {
     GenerationRequest request;
     request.height = 512;

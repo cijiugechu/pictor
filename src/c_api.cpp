@@ -148,13 +148,35 @@ pictor_status pictor_request_validate(const pictor_request* request, pictor_erro
 }
 
 pictor_status pictor_session_create(const pictor_session_options* options, pictor_session** output, pictor_error* error) noexcept {
+    return pictor_anima_session_create_with_backend(options, PICTOR_ANIMA_BACKEND_AUTO, output, error);
+}
+
+pictor_status pictor_anima_request_init(pictor_request* output, size_t size, int32_t preset, pictor_error* error) noexcept {
+    const auto status = pictor_request_init(output, size, preset, error);
+    if (status == PICTOR_OK) output->cache = PICTOR_CACHE_NONE;
+    return status;
+}
+
+pictor_status pictor_anima_session_backend(const pictor_session* session, pictor_anima_backend* output, pictor_error* error) noexcept {
+    if (output) *output = PICTOR_ANIMA_BACKEND_AUTO;
+    if (!session || !session->value || !output)
+        return finish(failure(ErrorCode::invalid_argument, "expected an Anima session and backend output"), error);
+    *output = static_cast<pictor_anima_backend>(session->value->backend());
+    return finish({}, error);
+}
+
+pictor_status pictor_anima_session_create_with_backend(const pictor_session_options* options, pictor_anima_backend backend,
+                                                      pictor_session** output, pictor_error* error) noexcept {
+    if (backend < PICTOR_ANIMA_BACKEND_AUTO || backend > PICTOR_ANIMA_BACKEND_MLX)
+        return finish(failure(ErrorCode::invalid_argument, "invalid Anima backend"), error);
     if (!output || *output)
         return finish(failure(ErrorCode::invalid_argument, "session output must point to NULL"), error);
     if (!options || options->struct_size != sizeof(*options) || !options->model_path || options->verbose > 1)
         return finish(failure(ErrorCode::invalid_argument, "invalid session options"), error);
     auto session = std::unique_ptr<pictor_session>(new (std::nothrow) pictor_session);
     if (!session) return finish(failure(ErrorCode::out_of_memory, "cannot allocate session handle"), error);
-    const auto status = pictor::AnimaSession::create({options->model_path, options->threads, options->verbose != 0}, session->value);
+    const auto status = pictor::AnimaSession::create({options->model_path, options->threads, options->verbose != 0},
+        static_cast<pictor::AnimaBackend>(backend), session->value);
     if (status) *output = session.release();
     return finish(status, error);
 }

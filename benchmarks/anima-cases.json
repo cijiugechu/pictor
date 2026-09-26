@@ -1,0 +1,22 @@
+{
+  "landscape": {
+    "prompt": "masterpiece, best quality, anime landscape, a small cottage by a lake, mountains, blue sky, no people",
+    "seed": 666,
+    "width": 512,
+    "height": 768
+  },
+  "portrait": {
+    "prompt": "masterpiece, best quality, anime illustration, adult woman, red scarf, blue coat, standing on a snowy village street, upper body, expressive brown eyes, detailed background",
+    "seed": 42,
+    "width": 512,
+    "height": 768
+  },
+  "weighted_unicode": {
+    "prompt": "masterpiece, 一只 (red fox:1.2), 雪地，蓝色的天空",
+    "negative_prompt": "blurry, low quality",
+    "seed": 123,
+    "width": 256,
+    "height": 256
+  },
+  "public_negative_prompt": "worst quality, low quality, blurry, deformed"
+}

@@ -1,0 +1,47 @@
+{
+  "repo": "xocialize/anima-mlx",
+  "revision": "4cc65eea48a3b57373ccbe1467c13c38c68b1b3f",
+  "reference_commit": "2338e281ee533568db558963f6e3da064eb60ff0",
+  "files": [
+    {
+      "path": "LICENSE",
+      "bytes": 1413,
+      "sha256": "e6a5b637ef89d52f2a167e52bf7df2fb53b3d48c6f67d6d0bdaedb65dd07f2ad"
+    },
+    {
+      "path": "README.md",
+      "bytes": 2558,
+      "sha256": "413d68655918f09ca2e851715cd853cddfbb59bfb4fc755577e69bbb4551f0ed"
+    },
+    {
+      "path": "config.json",
+      "bytes": 1059,
+      "sha256": "6a09ac7b798ac72aaeba2418a1d1bbbc63b487ed7979432c3daf2dd52e4dbcc6"
+    },
+    {
+      "path": "llm_adapter-bf16.safetensors",
+      "bytes": 269339413,
+      "sha256": "e903366e6ca9c5c1401a8565280422016f87c4c52565494f1bbd2e9e3d7aef99"
+    },
+    {
+      "path": "text_encoder-bf16.safetensors",
+      "bytes": 1192133145,
+      "sha256": "83c7728de1dcffc55870d46c55c31952438573f44e6508e3f8764e221647c885"
+    },
+    {
+      "path": "transformer-bf16.safetensors",
+      "bytes": 3912877140,
+      "sha256": "0dd0221179aea6d3bfbb4af54b56014027f4736428561f69f97bec56a31177bb"
+    },
+    {
+      "path": "transformer-int4.safetensors",
+      "bytes": 1380629354,
+      "sha256": "6ff2a5a2507938f45fb4797244352a7cf2f3a0b807c9cd0e0c993ab2b031baa6"
+    },
+    {
+      "path": "vae-bf16.safetensors",
+      "bytes": 146603728,
+      "sha256": "b073454af986db8ad68fd4b7b6820512e78faa703f49d735d4e31bfdff4491b8"
+    }
+  ]
+}

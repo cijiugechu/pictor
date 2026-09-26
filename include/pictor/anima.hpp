@@ -7,6 +7,10 @@ namespace pictor {
 
 enum class Preset { fast, balanced, quality };
 GenerationRequest preset_request(Preset preset);
+// Directories select native MLX; explicit GGUF files retain the ggml backend.
+enum class AnimaBackend { automatic = 0, ggml = 1, mlx = 2 };
+// Uncached P3 presets for MLX (also valid on ggml). Legacy preset_request is unchanged.
+GenerationRequest anima_request(Preset preset = Preset::balanced);
 
 struct SessionOptions {
     std::filesystem::path model_path;
@@ -16,10 +20,14 @@ struct SessionOptions {
 
 // Owns resident model weights. Backend calls across sessions are serialized because
 // this sd.cpp revision uses global callbacks. Callbacks must not re-enter the API.
+// MLX requires cache=none; use anima_request() for its presets. Tiled MLX decode
+// is opt-in and approximate. An explicit GGUF path keeps the legacy ggml route.
 class AnimaSession {
 public:
     // output must be empty. On failure it remains empty.
     [[nodiscard]] static Status create(const SessionOptions& options, std::unique_ptr<AnimaSession>& output) noexcept;
+    [[nodiscard]] static Status create(const SessionOptions& options, AnimaBackend backend,
+                                       std::unique_ptr<AnimaSession>& output) noexcept;
     ~AnimaSession();
     AnimaSession(const AnimaSession&) = delete;
     AnimaSession& operator=(const AnimaSession&) = delete;
@@ -31,6 +39,7 @@ public:
     [[nodiscard]] Status generate_batch(const GenerationRequest& request, int count, BatchResult& output,
                                        BatchProgressCallback progress = nullptr, void* userdata = nullptr) noexcept;
     double load_seconds() const noexcept;
+    AnimaBackend backend() const noexcept;
 
 private:
     struct Impl;

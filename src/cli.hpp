@@ -11,6 +11,7 @@ enum class Model { anima, flux_klein };
 struct Options {
     Model model = Model::anima;
     KleinBackend backend = KleinBackend::automatic;
+    AnimaBackend anima_backend = AnimaBackend::automatic;
     std::filesystem::path text_encoder;
     std::filesystem::path vae;
     std::vector<std::filesystem::path> reference_images;

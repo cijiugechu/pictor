@@ -28,6 +28,7 @@ int main() {
     std::unique_ptr<pictor::AnimaSession> anima;
     std::unique_ptr<pictor::FluxKleinSession> klein;
     CHECK(pictor::AnimaSession::create({__FILE__}, anima));
+    CHECK(anima->backend() == pictor::AnimaBackend::ggml);
     CHECK(pictor::FluxKleinSession::create({__FILE__, __FILE__, __FILE__}, klein));
     pictor::Image first, second;
     State a{3}, b{4};
@@ -75,6 +76,9 @@ int main() {
     c_options.diffusion_model_path = c_options.text_encoder_path = c_options.vae_path = __FILE__;
     pictor_session* c_session = nullptr;
     CHECK(pictor_flux_klein_session_create(&c_options, &c_session, &error) == PICTOR_OK);
+    pictor_anima_backend wrong_backend = PICTOR_ANIMA_BACKEND_MLX;
+    CHECK(pictor_anima_session_backend(c_session, &wrong_backend, &error) == PICTOR_INVALID_ARGUMENT);
+    CHECK(wrong_backend == PICTOR_ANIMA_BACKEND_AUTO);
     pictor_flux_klein_edit_options c_edit;
     CHECK(pictor_flux_klein_edit_options_init(&c_edit, sizeof(c_edit), &error) == PICTOR_OK);
     pictor_request c_request;
