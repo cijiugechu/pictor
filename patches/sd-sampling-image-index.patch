@@ -1,0 +1,20 @@
+diff --git a/include/stable-diffusion.h b/include/stable-diffusion.h
+--- a/include/stable-diffusion.h
++++ b/include/stable-diffusion.h
+@@ -375,0 +376,2 @@
++// Pictor extension: current zero-based image sampling index, or -1 outside sampling.
++SD_API int sd_get_sampling_image_index(void);
+diff --git a/src/stable-diffusion.cpp b/src/stable-diffusion.cpp
+--- a/src/stable-diffusion.cpp
++++ b/src/stable-diffusion.cpp
+@@ -3358,0 +3359,8 @@
++static thread_local int sampling_image_index = -1;
++SD_API int sd_get_sampling_image_index(void) { return sampling_image_index; }
++struct SamplingImageIndexGuard {
++    int previous = sampling_image_index;
++    explicit SamplingImageIndexGuard(int index) { sampling_image_index = index; }
++    ~SamplingImageIndexGuard() { sampling_image_index = previous; }
++};
++
+@@ -3398,0 +3407 @@
++        SamplingImageIndexGuard sampling_index_guard(b);

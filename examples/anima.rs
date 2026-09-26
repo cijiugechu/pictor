@@ -55,6 +55,7 @@ struct ImageInfo {
     seed: i64,
     generation_seconds: f64,
 }
+type BatchProgress = Option<unsafe extern "C" fn(i32, i32, i32, i32, f32, *mut c_void)>;
 type Progress = Option<unsafe extern "C" fn(i32, i32, f32, *mut c_void)>;
 
 #[repr(C)]
@@ -84,8 +85,9 @@ unsafe extern "C" {
         error: *mut Error,
     ) -> i32;
     fn pictor_flux_klein_request_init(out: *mut Request, size: usize, error: *mut Error) -> i32;
-    fn pictor_flux_klein_session_create(
+    fn pictor_flux_klein_session_create_with_backend(
         options: *const KleinOptions,
+        backend: i32,
         out: *mut *mut Session,
         error: *mut Error,
     ) -> i32;
@@ -101,6 +103,32 @@ unsafe extern "C" {
         progress: Progress,
         userdata: *mut c_void,
         out: *mut *mut Image,
+        error: *mut Error,
+    ) -> i32;
+    fn pictor_session_generate_batch(
+        session: *mut Session,
+        request: *const Request,
+        count: i32,
+        progress: BatchProgress,
+        userdata: *mut c_void,
+        outputs: *mut *mut Image,
+        batch_seconds: *mut f64,
+        error: *mut Error,
+    ) -> i32;
+    fn pictor_flux_klein_session_edit_batch(
+        session: *mut Session,
+        request: *const Request,
+        options: *const EditOptions,
+        count: i32,
+        progress: BatchProgress,
+        userdata: *mut c_void,
+        outputs: *mut *mut Image,
+        batch_seconds: *mut f64,
+        error: *mut Error,
+    ) -> i32;
+    fn pictor_flux_klein_session_set_hidden_state_compression(
+        session: *mut Session,
+        enabled: u32,
         error: *mut Error,
     ) -> i32;
     fn pictor_session_destroy(session: *mut Session);
@@ -164,7 +192,8 @@ unsafe extern "C" fn progress(_: i32, _: i32, _: f32, userdata: *mut c_void) {
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let first = args.next();
-    let klein = first.as_deref() == Some("--klein");
+    let mlx = first.as_deref() == Some("--mlx");
+    let klein = mlx || first.as_deref() == Some("--klein");
     let model_arg = if klein { args.next() } else { first };
     let reference_path = if klein { args.next() } else { None };
     let model = CString::new(
@@ -217,23 +246,35 @@ fn run() -> Result<(), String> {
                 std::path::Path::new(model_arg.as_deref().unwrap_or("/nonexistent-pictor-klein"));
             let diffusion = CString::new(
                 directory
-                    .join("flux-2-klein-4b-Q4_0.gguf")
+                    .join(if mlx {
+                        "transformer"
+                    } else {
+                        "flux-2-klein-4b-Q4_0.gguf"
+                    })
                     .to_string_lossy()
                     .as_bytes(),
             )
             .map_err(|e| e.to_string())?;
             let encoder = CString::new(
                 directory
-                    .join("Qwen3-4B-Q4_K_M.gguf")
+                    .join(if mlx {
+                        "text_encoder"
+                    } else {
+                        "Qwen3-4B-Q4_K_M.gguf"
+                    })
                     .to_string_lossy()
                     .as_bytes(),
             )
             .map_err(|e| e.to_string())?;
             let vae = CString::new(
-                directory
-                    .join("flux2-vae.safetensors")
-                    .to_string_lossy()
-                    .as_bytes(),
+                (if mlx {
+                    std::path::Path::new("models/flux2-klein-4b")
+                } else {
+                    directory
+                })
+                .join("full_encoder_small_decoder.safetensors")
+                .to_string_lossy()
+                .as_bytes(),
             )
             .map_err(|e| e.to_string())?;
             let mut paths: KleinOptions = zeroed();
@@ -244,13 +285,57 @@ fn run() -> Result<(), String> {
             paths.diffusion_model_path = diffusion.as_ptr();
             paths.text_encoder_path = encoder.as_ptr();
             paths.vae_path = vae.as_ptr();
-            pictor_flux_klein_session_create(&paths, &mut session.0, &mut error)
+            pictor_flux_klein_session_create_with_backend(
+                &paths,
+                if mlx { 2 } else { 1 },
+                &mut session.0,
+                &mut error,
+            )
         } else {
             pictor_session_create(&options, &mut session.0, &mut error)
         };
         if model_arg.is_none() {
             if status != 1 || !session.0.is_null() || error.message[0] == 0 {
                 return Err("unexpected error result".into());
+            }
+            if pictor_flux_klein_session_set_hidden_state_compression(
+                ptr::null_mut(),
+                1,
+                &mut error,
+            ) != 1
+            {
+                return Err("unexpected HS error result".into());
+            }
+            let mut images = [ptr::null_mut(); 2];
+            let mut batch_seconds = 123.0;
+            if pictor_session_generate_batch(
+                ptr::null_mut(),
+                &request,
+                2,
+                None,
+                ptr::null_mut(),
+                images.as_mut_ptr(),
+                &mut batch_seconds,
+                &mut error,
+            ) != 1
+                || batch_seconds != 0.0
+                || images.iter().any(|image| !image.is_null())
+            {
+                return Err("unexpected batch error result".into());
+            }
+            if pictor_flux_klein_session_edit_batch(
+                ptr::null_mut(),
+                &request,
+                &edit,
+                2,
+                None,
+                ptr::null_mut(),
+                images.as_mut_ptr(),
+                &mut batch_seconds,
+                &mut error,
+            ) != 1
+            {
+                return Err("unexpected edit batch error result".into());
             }
             println!("PASS: Rust C ABI layout, validation and errors");
             return Ok(());

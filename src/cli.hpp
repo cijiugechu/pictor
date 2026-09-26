@@ -10,10 +10,12 @@ enum class Model { anima, flux_klein };
 
 struct Options {
     Model model = Model::anima;
+    KleinBackend backend = KleinBackend::automatic;
     std::filesystem::path text_encoder;
     std::filesystem::path vae;
     std::vector<std::filesystem::path> reference_images;
     bool auto_resize_reference = true;
+    bool hidden_state_compression = false;
     SessionOptions session;
     GenerationRequest request;
     std::filesystem::path output = "output.png";

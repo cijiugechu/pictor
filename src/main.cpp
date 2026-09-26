@@ -1,13 +1,14 @@
 #include "cli.hpp"
 #include "logging.hpp"
 
+#include <algorithm>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 
 namespace {
 pictor::Status write_metadata(const std::filesystem::path& path, const pictor::cli::Options& options,
-                    const pictor::Image& image, double load_seconds) noexcept {
+                    const pictor::Image& image, double load_seconds, int batch_count, double batch_seconds) noexcept {
     std::error_code ec;
     const auto model = std::filesystem::absolute(options.session.model_path, ec);
     if (ec) return pictor::failure(pictor::ErrorCode::io_error, "cannot resolve model path: " + ec.message());
@@ -30,6 +31,7 @@ pictor::Status write_metadata(const std::filesystem::path& path, const pictor::c
         << "  \"model\": " << quote(model.string()) << ",\n";
     if (klein) out << "  \"text_encoder\": " << quote(text_encoder.string()) << ",\n"
                    << "  \"vae\": " << quote(vae.string()) << ",\n";
+    out << "  \"backend\": " << quote(klein && options.backend == pictor::KleinBackend::mlx ? "mlx" : "ggml") << ",\n";
     out << "  \"mode\": " << quote(options.reference_images.empty() ? "text-to-image" : "reference-edit") << ",\n";
     if (!options.reference_images.empty()) {
         out << "  \"reference_images\": [";
@@ -49,10 +51,14 @@ pictor::Status write_metadata(const std::filesystem::path& path, const pictor::c
         << "  \"sampler\": " << quote(klein ? "euler" : "er_sde") << ",\n"
         << "  \"scheduler\": " << quote(klein ? "discrete" : "smoothstep") << ",\n"
         << "  \"cache\": " << quote(request.cache == pictor::CacheMode::spectrum ? "spectrum" : "none") << ",\n"
-        << "  \"flash_attention\": " << (klein ? "false" : "true") << ",\n"
+        << "  \"flash_attention\": " << (klein && options.backend != pictor::KleinBackend::mlx ? "false" : "true") << ",\n"
         << "  \"diffusion_flash_attention\": true,\n"
         << "  \"vae_tiling\": " << (request.vae_tiling ? "true" : "false") << ",\n"
         << "  \"load_seconds\": " << load_seconds << ",\n"
+        << "  \"hidden_state_compression\": " << (options.hidden_state_compression ? "true" : "false") << ",\n"
+        << "  \"batch_count\": " << batch_count << ",\n"
+        << "  \"batch_generation_seconds\": " << batch_seconds << ",\n"
+        << "  \"generation_seconds_kind\": \"batch_average\",\n"
         << "  \"generation_seconds\": " << image.generation_seconds << "\n}\n";
     out.close();
     if (!out) return pictor::failure(pictor::ErrorCode::io_error, "failed writing metadata: " + path.string());
@@ -110,30 +116,45 @@ int main(int argc, char** argv) {
     const auto created = options.model == pictor::cli::Model::anima
         ? pictor::AnimaSession::create(options.session, anima)
         : pictor::FluxKleinSession::create({options.session.model_path, options.text_encoder, options.vae,
-                                          options.session.threads, options.session.verbose}, klein);
+                                          options.session.threads, options.session.verbose}, options.backend, klein);
     if (!created) return report(created);
+    if (klein) options.backend = klein->backend();
+    if (klein)
+        if (const auto status = klein->set_hidden_state_compression(options.hidden_state_compression); !status) return report(status);
     const auto load_seconds = anima ? anima->load_seconds() : klein->load_seconds();
     pictor::logging::app().info("Model loaded in {:.2f}s", load_seconds);
-    for (int i = 0; i < options.count; ++i) {
-        options.request.seed = base_seed + i;
-        pictor::logging::app().info("Generating {}/{} (seed {})", i + 1, options.count, options.request.seed);
-        pictor::Image image;
-        const auto progress = [](const pictor::Progress& value, void*) noexcept {
-            pictor::logging::app().info("Step {}/{}", value.step, value.steps);
+    const int batch_limit = std::min(pictor::max_batch_count, static_cast<int>(pictor::max_batch_pixels /
+        (static_cast<std::size_t>(options.request.width) * options.request.height)));
+    for (int offset = 0; offset < options.count;) {
+        const int count = std::min(batch_limit, options.count - offset);
+        options.request.seed = base_seed + offset;
+        pictor::logging::app().info("Generating batch: images {}..{} of {}", offset + 1, offset + count, options.count);
+        struct ProgressContext { int offset; int total; } context{offset, options.count};
+        const auto progress = [](const pictor::BatchProgress& value, void* data) noexcept {
+            const auto& context = *static_cast<ProgressContext*>(data);
+            pictor::logging::app().info("Image {}/{}: step {}/{}", context.offset + value.image_index + 1,
+                                       context.total, value.sampling.step, value.sampling.steps);
         };
+        pictor::BatchResult batch;
         edit.generation = options.request;
-        const auto generated = anima ? anima->generate(options.request, image, progress)
-            : reference_images.empty() ? klein->generate(options.request, image, progress)
-                                       : klein->edit(edit, image, progress);
+        const auto generated = anima ? anima->generate_batch(options.request, count, batch, progress, &context)
+            : reference_images.empty() ? klein->generate_batch(options.request, count, batch, progress, &context)
+                                       : klein->edit_batch(edit, count, batch, progress, &context);
         if (!generated) return report(generated);
-        std::filesystem::path path;
-        if (const auto status = pictor::cli::output_path(options, i, path); !status) return report(status);
-        if (const auto status = pictor::write_png(path, image); !status) return report(status);
-        auto metadata = path;
-        metadata.replace_extension(".json");
-        if (const auto status = write_metadata(metadata, options, image, load_seconds); !status) return report(status);
-        pictor::logging::app().info("Generated in {:.2f}s", image.generation_seconds);
-        std::cout << path.string() << '\n';
+        for (int i = 0; i < count; ++i) {
+            const auto& image = batch.images[i];
+            std::filesystem::path path;
+            if (const auto status = pictor::cli::output_path(options, offset + i, path); !status) return report(status);
+            if (const auto status = pictor::write_png(path, image); !status) return report(status);
+            auto metadata = path;
+            metadata.replace_extension(".json");
+            if (const auto status = write_metadata(metadata, options, image, load_seconds, count, batch.generation_seconds); !status)
+                return report(status);
+            std::cout << path.string() << '\n';
+        }
+        pictor::logging::app().info("Batch generated in {:.2f}s ({:.2f}s/image amortized)",
+                                   batch.generation_seconds, batch.generation_seconds / count);
+        offset += count;
     }
     return 0;
 }

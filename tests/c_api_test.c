@@ -13,6 +13,12 @@ int main(void) {
     pictor_session_options options;
     pictor_session* session = NULL;
     pictor_image* image = NULL;
+    CHECK(pictor_flux_klein_session_set_hidden_state_compression(NULL, 1, &error) == PICTOR_INVALID_ARGUMENT);
+    pictor_klein_backend selected = PICTOR_KLEIN_BACKEND_MLX;
+    CHECK(pictor_flux_klein_session_backend(NULL, &selected, &error) == PICTOR_INVALID_ARGUMENT);
+    CHECK(selected == PICTOR_KLEIN_BACKEND_AUTO);
+    CHECK(pictor_flux_klein_session_create_with_backend(NULL, (pictor_klein_backend)99, &session, &error) == PICTOR_INVALID_ARGUMENT);
+    CHECK(session == NULL);
     CHECK(pictor_abi_version() == PICTOR_ABI_VERSION);
     CHECK(pictor_request_init(&request, sizeof(request), PICTOR_PRESET_FAST, &error) == PICTOR_OK);
     CHECK(request.width == 512 && request.height == 768 && request.steps == 3);
@@ -63,6 +69,11 @@ int main(void) {
     CHECK(pictor_session_generate(NULL, &request, NULL, NULL, &image, &error) == PICTOR_INVALID_ARGUMENT && image == NULL);
     CHECK(pictor_session_generate(NULL, NULL, NULL, NULL, NULL, &error) == PICTOR_INVALID_ARGUMENT);
     double seconds = 123;
+    pictor_image* batch[2] = {NULL, NULL};
+    CHECK(pictor_session_generate_batch(NULL, &request, 2, NULL, NULL, batch, &seconds, &error) == PICTOR_INVALID_ARGUMENT);
+    CHECK(!batch[0] && !batch[1] && seconds == 0);
+    CHECK(pictor_flux_klein_session_edit_batch(NULL, &request, NULL, 2, NULL, NULL, batch, &seconds, &error) == PICTOR_INVALID_ARGUMENT);
+    CHECK(pictor_session_generate_batch(NULL, NULL, 0, NULL, NULL, NULL, NULL, &error) == PICTOR_INVALID_ARGUMENT);
     CHECK(pictor_session_load_seconds(NULL, &seconds, &error) == PICTOR_INVALID_ARGUMENT && seconds == 0);
     CHECK(pictor_session_load_seconds(NULL, NULL, &error) == PICTOR_INVALID_ARGUMENT);
     pictor_image_info info;

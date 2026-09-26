@@ -27,10 +27,10 @@ Status create(const sd_ctx_params_t& params, sd_ctx_t*& output) noexcept {
     });
 }
 
-Status generate(sd_ctx_t* context, const sd_img_gen_params_t& params, sd_image_t*& output) noexcept {
+Status generate(sd_ctx_t* context, const sd_img_gen_params_t& params, sd_image_t*& output, bool hidden_state_compression) noexcept {
     output = nullptr;
     return guard([&] {
-        output = generate_image(context, &params);
+        output = hidden_state_compression ? generate_image_with_hs(context, &params) : generate_image(context, &params);
         return output && output->data ? Status{} : failure(ErrorCode::backend_error, "image generation failed (enable verbose for backend logs)");
     });
 }

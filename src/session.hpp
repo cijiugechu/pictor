@@ -23,12 +23,17 @@ public:
     Session& operator=(const Session&) = delete;
     Status generate(const GenerationRequest& request, Image& image, ProgressCallback progress, void* userdata,
                     const FluxKleinEditRequest* edit = nullptr) noexcept;
+    Status generate_batch(const GenerationRequest& request, int count, BatchResult& output,
+                          BatchProgressCallback progress, void* userdata,
+                          const FluxKleinEditRequest* edit = nullptr) noexcept;
+    Status set_hidden_state_compression(bool enabled) noexcept;
     double load_seconds() const noexcept { return load_seconds_; }
 private:
     explicit Session(Model model, bool verbose) noexcept : model_(model), verbose_(verbose) {}
     sd_ctx_t* context_ = nullptr;
     Model model_;
     bool verbose_;
+    bool hidden_state_compression_ = false; // Protected by backend_mutex.
     double load_seconds_ = 0;
     std::string model_path_, text_encoder_path_, vae_path_;
 };

@@ -18,12 +18,14 @@ fn progress(step: i32, steps: i32, _: f32, userdata: ?*anyopaque) callconv(.c) v
 
 // With no arguments, checks linking and errors without weights.
 // With a model path, generates outputs/zig.png through the C ABI.
-// --klein [model-directory] [reference.png] selects Klein generation/editing.
+// --mlx [MLX model-directory] uses native MLX and the default Small Decoder.
+// --klein [GGUF model-directory] [reference.png] selects Klein generation/editing.
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (c.pictor_abi_version() != c.PICTOR_ABI_VERSION) return error.AbiMismatch;
     var err: c.pictor_error = undefined;
-    const klein = args.len > 1 and std.mem.eql(u8, args[1], "--klein");
+    const mlx = args.len > 1 and std.mem.eql(u8, args[1], "--mlx");
+    const klein = mlx or (args.len > 1 and std.mem.eql(u8, args[1], "--klein"));
     const model_index: usize = if (klein) 2 else 1;
     const has_model = args.len > model_index;
     const reference_path = if (klein and args.len > 3) args[3] else null;
@@ -50,14 +52,23 @@ pub fn main(init: std.process.Init) !void {
         try check(c.pictor_flux_klein_options_init(&paths, @sizeOf(@TypeOf(paths)), &err), &err);
         const directory = if (has_model) args[model_index] else "/nonexistent-pictor-klein";
         const allocator = init.arena.allocator();
-        paths.diffusion_model_path = (try std.fmt.allocPrintSentinel(allocator, "{s}/flux-2-klein-4b-Q4_0.gguf", .{directory}, 0)).ptr;
-        paths.text_encoder_path = (try std.fmt.allocPrintSentinel(allocator, "{s}/Qwen3-4B-Q4_K_M.gguf", .{directory}, 0)).ptr;
-        paths.vae_path = (try std.fmt.allocPrintSentinel(allocator, "{s}/flux2-vae.safetensors", .{directory}, 0)).ptr;
-        break :blk c.pictor_flux_klein_session_create(&paths, &session, &err);
+        paths.diffusion_model_path = (try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ directory, if (mlx) "transformer" else "flux-2-klein-4b-Q4_0.gguf" }, 0)).ptr;
+        paths.text_encoder_path = (try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ directory, if (mlx) "text_encoder" else "Qwen3-4B-Q4_K_M.gguf" }, 0)).ptr;
+        paths.vae_path = if (mlx) "models/flux2-klein-4b/full_encoder_small_decoder.safetensors" else (try std.fmt.allocPrintSentinel(allocator, "{s}/full_encoder_small_decoder.safetensors", .{directory}, 0)).ptr;
+        break :blk c.pictor_flux_klein_session_create_with_backend(&paths, if (mlx) c.PICTOR_KLEIN_BACKEND_MLX else c.PICTOR_KLEIN_BACKEND_GGML, &session, &err);
     } else c.pictor_session_create(&options, &session, &err);
     if (!has_model) {
         if (status != c.PICTOR_INVALID_ARGUMENT or session != null or err.message[0] == 0)
             return error.UnexpectedResult;
+        if (c.pictor_flux_klein_session_set_hidden_state_compression(null, 1, &err) != c.PICTOR_INVALID_ARGUMENT)
+            return error.UnexpectedHsResult;
+        var images = [_]?*c.pictor_image{ null, null };
+        var batch_seconds: f64 = 123;
+        if (c.pictor_session_generate_batch(null, &request, 2, null, null, &images, &batch_seconds, &err) != c.PICTOR_INVALID_ARGUMENT or
+            batch_seconds != 0 or images[0] != null or images[1] != null)
+            return error.UnexpectedBatchResult;
+        if (c.pictor_flux_klein_session_edit_batch(null, &request, &edit, 2, null, null, &images, &batch_seconds, &err) != c.PICTOR_INVALID_ARGUMENT)
+            return error.UnexpectedBatchResult;
         std.debug.print("PASS: Zig C ABI import, layout, validation and errors\n", .{});
         return;
     }

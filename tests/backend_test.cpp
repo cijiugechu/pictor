@@ -19,6 +19,7 @@ int main() {
     sd_image_t* image = nullptr;
     sd_img_gen_params_t request{};
     CHECK(backend::generate(context, request, image).code == ErrorCode::backend_error && !image);
+    CHECK(backend::generate(context, request, image, true).code == ErrorCode::backend_error && !image);
     CHECK(backend::destroy(context).code == ErrorCode::backend_error);
     std::puts("PASS: upstream exceptions converted before entering no-exception code");
 }

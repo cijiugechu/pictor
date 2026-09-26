@@ -42,12 +42,14 @@ if ! git -C "$src/ggml" apply --unidiff-zero --reverse --check "$patch" 2>/dev/n
     echo "Applied Anima Metal im2col3d/padding patch."
 fi
 
-if git -C "$src" apply --unidiff-zero --reverse --check "$progress_patch" 2>/dev/null; then
-    exit 0
-fi
-git -C "$src" apply --unidiff-zero --check "$progress_patch" || {
-    echo "Model progress callback patch does not apply. Resolve local changes in sd.cpp first." >&2
-    exit 1
-}
-git -C "$src" apply --unidiff-zero "$progress_patch"
-echo "Applied model progress callback stdout patch."
+for sd_patch in "$progress_patch" "$root/patches/sd-sampling-image-index.patch" "$root/patches/sd-flux-hidden-state-compression.patch"; do
+    if git -C "$src" apply --unidiff-zero --reverse --check "$sd_patch" 2>/dev/null; then
+        continue
+    fi
+    git -C "$src" apply --unidiff-zero --check "$sd_patch" || {
+        echo "sd.cpp patch does not apply: $sd_patch. Resolve local changes first." >&2
+        exit 1
+    }
+    git -C "$src" apply --unidiff-zero "$sd_patch"
+    echo "Applied $(basename "$sd_patch")."
+done

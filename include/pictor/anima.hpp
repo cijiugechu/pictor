@@ -27,6 +27,9 @@ public:
     // output is cleared before each attempt, including failed requests.
     [[nodiscard]] Status generate(const GenerationRequest& request, Image& output,
                                   ProgressCallback progress = nullptr, void* userdata = nullptr) noexcept;
+    // Same settings, consecutive seeds; -1 resolves one random starting seed.
+    [[nodiscard]] Status generate_batch(const GenerationRequest& request, int count, BatchResult& output,
+                                       BatchProgressCallback progress = nullptr, void* userdata = nullptr) noexcept;
     double load_seconds() const noexcept;
 
 private:

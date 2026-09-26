@@ -83,6 +83,17 @@ Status validate_request(const GenerationRequest& request) noexcept {
     return {};
 }
 
+Status validate_batch_request(const GenerationRequest& request, int count) noexcept {
+    if (const auto status = validate_request(request); !status) return status;
+    if (count < 1 || count > max_batch_count)
+        return failure(ErrorCode::invalid_argument, "batch count must be between 1 and 8");
+    if (static_cast<std::size_t>(request.width) * request.height * count > max_batch_pixels)
+        return failure(ErrorCode::invalid_argument, "batch output exceeds 16 megapixels");
+    if (request.seed > INT64_MAX - (count - 1))
+        return failure(ErrorCode::invalid_argument, "seed sequence would overflow");
+    return {};
+}
+
 Status resolve_seed(std::int64_t seed, std::int64_t& output) noexcept {
     output = 0;
     if (seed < -1) return failure(ErrorCode::invalid_argument, "invalid seed");

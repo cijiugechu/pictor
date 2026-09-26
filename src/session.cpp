@@ -1,4 +1,5 @@
 #include "session.hpp"
+#include "inference_lock.hpp"
 #include "pictor/flux_klein.hpp"
 #include "backend.hpp"
 #include "logging.hpp"
@@ -20,11 +21,12 @@ double elapsed(Clock::time_point start) {
 
 struct Callbacks {
     bool verbose;
-    ProgressCallback progress;
     void* userdata;
+    BatchProgressCallback progress;
+    int image_count;
 
-    explicit Callbacks(bool verbose_value, ProgressCallback callback = nullptr, void* data = nullptr)
-        : verbose(verbose_value), progress(callback), userdata(data) {
+    explicit Callbacks(bool verbose_value, BatchProgressCallback callback = nullptr, void* data = nullptr, int count = 1)
+        : verbose(verbose_value), userdata(data), progress(callback), image_count(count) {
         sd_set_log_callback([](sd_log_level_t level, const char* text, void* data) noexcept {
             auto& self = *static_cast<Callbacks*>(data);
             if (!self.verbose && level < SD_LOG_WARN) return;
@@ -42,7 +44,9 @@ struct Callbacks {
         }, this);
         sd_set_progress_callback([](int step, int steps, float seconds, void* data) noexcept {
             auto& self = *static_cast<Callbacks*>(data);
-            if (self.progress) self.progress({step, steps, seconds}, self.userdata);
+            const int index = sd_get_sampling_image_index();
+            if (self.progress && index >= 0 && index < self.image_count)
+                self.progress({index, self.image_count, {step, steps, seconds}}, self.userdata);
         }, this);
     }
 
@@ -53,14 +57,17 @@ struct Callbacks {
 };
 
 struct ImageDeleter {
+    int count;
     void operator()(sd_image_t* images) const {
         if (images) {
-            std::free(images[0].data); // Requests always contain exactly one image.
+            for (int i = 0; i < count; ++i) std::free(images[i].data);
             std::free(images);
         }
     }
 };
 } // namespace
+
+std::mutex& inference_mutex() noexcept { return backend_mutex; }
 
 Session::~Session() {
     if (!context_) return;
@@ -122,9 +129,32 @@ Status Session::create(Model model, const ModelFiles& files, int threads, bool v
     return {};
 }
 
+Status Session::set_hidden_state_compression(bool enabled) noexcept {
+    if (model_ != Model::flux_klein)
+        return failure(ErrorCode::invalid_argument, "hidden-state compression requires Klein");
+    std::lock_guard<std::mutex> lock(backend_mutex);
+    hidden_state_compression_ = enabled;
+    return {};
+}
+
 Status Session::generate(const GenerationRequest& request, Image& image,
                          ProgressCallback progress, void* userdata, const FluxKleinEditRequest* edit) noexcept {
     image = {};
+    struct Adapter { ProgressCallback function; void* userdata; } adapter{progress, userdata};
+    const auto callback = [](const BatchProgress& value, void* data) noexcept {
+        auto& adapter = *static_cast<Adapter*>(data);
+        adapter.function(value.sampling, adapter.userdata);
+    };
+    BatchResult result;
+    const auto status = generate_batch(request, 1, result, progress ? callback : static_cast<BatchProgressCallback>(nullptr), &adapter, edit);
+    if (status) image = std::move(result.images.front());
+    return status;
+}
+
+Status Session::generate_batch(const GenerationRequest& request, int count, BatchResult& result,
+                               BatchProgressCallback progress, void* userdata, const FluxKleinEditRequest* edit) noexcept {
+    result = {};
+    if (const auto status = validate_batch_request(request, count); !status) return status;
     if (edit) {
         if (model_ != Model::flux_klein) return failure(ErrorCode::invalid_argument, "reference editing requires Klein");
         if (const auto status = validate_flux_klein_edit_request(*edit); !status) return status;
@@ -134,7 +164,7 @@ Status Session::generate(const GenerationRequest& request, Image& image,
     std::int64_t seed;
     if (const auto status = resolve_seed(request.seed, seed); !status) return status;
     std::lock_guard<std::mutex> lock(backend_mutex);
-    Callbacks callbacks(verbose_, progress, userdata);
+    Callbacks callbacks(verbose_, progress, userdata, count);
     sd_img_gen_params_t params;
     sd_img_gen_params_init(&params);
     params.prompt = request.prompt.c_str();
@@ -142,7 +172,7 @@ Status Session::generate(const GenerationRequest& request, Image& image,
     params.width = request.width;
     params.height = request.height;
     params.seed = seed;
-    params.batch_count = 1;
+    params.batch_count = count;
     params.sample_params.sample_steps = request.steps;
     params.sample_params.guidance.txt_cfg = request.cfg_scale;
     params.sample_params.sample_method = model_ == Model::anima ? ER_SDE_SAMPLE_METHOD : EULER_SAMPLE_METHOD;
@@ -162,15 +192,23 @@ Status Session::generate(const GenerationRequest& request, Image& image,
 
     const auto start = Clock::now();
     sd_image_t* raw_output = nullptr;
-    const auto status = backend::generate(context_, params, raw_output);
-    std::unique_ptr<sd_image_t, ImageDeleter> output(raw_output);
+    const auto status = backend::generate(context_, params, raw_output, hidden_state_compression_);
+    std::unique_ptr<sd_image_t, ImageDeleter> output(raw_output, ImageDeleter{count});
     const auto seconds = elapsed(start);
     if (!status) return status;
-    if (output->width != static_cast<unsigned>(request.width) ||
-        output->height != static_cast<unsigned>(request.height) || output->channel != 3)
-        return failure(ErrorCode::backend_error, "backend returned unexpected image dimensions or channels");
-    const auto size = static_cast<std::size_t>(output->width) * output->height * output->channel;
-    image = {request.width, request.height, 3, {output->data, output->data + size}, seed, seconds};
+    // Validate the entire array before publishing any images.
+    for (int i = 0; i < count; ++i) {
+        const auto& item = raw_output[i];
+        if (!item.data || item.width != static_cast<unsigned>(request.width) ||
+            item.height != static_cast<unsigned>(request.height) || item.channel != 3)
+            return failure(ErrorCode::backend_error, "backend returned invalid image data, dimensions or channels");
+    }
+    for (int i = 0; i < count; ++i) {
+        const auto& item = raw_output[i];
+        const auto size = static_cast<std::size_t>(item.width) * item.height * item.channel;
+        result.images.push_back({request.width, request.height, 3, {item.data, item.data + size}, seed + i, seconds / count});
+    }
+    result.generation_seconds = seconds;
     return {};
 }
 

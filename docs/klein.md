@@ -1,21 +1,27 @@
 # FLUX.2-klein-4B generation and reference editing
 
-Pictor supports the **distilled 4B checkpoint** using the same pinned sd.cpp and
-Metal backend as Anima. The public C++ and C interfaces remain exception-free;
-only the private upstream exception boundary enables catch handlers.
-Reference-image editing uses the same three weight files. Klein base/9B variants,
-masked inpainting, LoRAs, SDNQ/Quanto weights, and the original project's
-MLX/hidden-state-compression accelerations are outside the current scope.
+Pictor supports the **distilled 4B checkpoint**. Apple Silicon defaults to native
+MLX with aligned Philox/Euler/discrete sampling and the official Small Decoder.
+The C++ and C ABI remain exception-free at the public boundary. Both backends
+support text, reference editing and batches. See [MLX setup and API selection](mlx.md).
+Explicit GGUF paths or `--backend ggml` select the retained sd.cpp backend.
+Base/9B variants, masked inpainting, LoRAs and SDNQ/Quanto weights are unsupported.
 
 ## Weights
 
+`zig build download-klein-model` downloads the configured default backend. On
+Apple Silicon that is the pinned MLX manifest plus Small Decoder described in
+[mlx.md](mlx.md). The following table records the retained **ggml comparison
+weights**, including the original VAE. Its downloader also fetches Small Decoder.
+
+
 ```sh
-zig build download-klein-model
-# Optional directory:
+bash scripts/download-klein-model.sh
+# Optional ggml directory:
 bash scripts/download-klein-model.sh /absolute/path/klein
 ```
 
-Three files total **5,293,871,164 bytes** (~5.3 GB / 4.93 GiB). Downloads resume
+The three comparison files total **5,293,871,164 bytes** (~5.3 GB / 4.93 GiB). Downloads resume
 from `.part` files and verify SHA-256 before renaming; existing files are verified
 and are never silently replaced. Builds and ordinary tests do not download weights.
 The sizes below describe disk files, not peak inference memory.
@@ -53,9 +59,9 @@ zig-out/bin/pictor flux-klein --prompt "A red fox in a sunlit forest" \
 ```
 
 Defaults: 512×512, 4 steps, CFG 1, Euler, discrete scheduler (including sd.cpp's
-FLUX.2 flow shift), diffusion flash attention, no cache. Text-encoder flash
-attention and parameter CPU offload are not enabled by this configuration.
-`--llm` aliases `--text-encoder`. Default paths are under `models/flux2-klein-4b`.
+FLUX.2 flow shift), fast attention, no cache. ggml enables diffusion flash
+attention but not text-encoder flash attention. MLX uses its fast SDPA kernels.
+`--llm` aliases `--text-encoder`; backend-specific default paths are in [mlx.md](mlx.md).
 `--steps`, `--cfg-scale`, `--threads`, `--vae-tiling`, `--verbose`, `--count`,
 `--overwrite` and output naming follow the existing CLI. `--preset` and `--model`
 are Anima-only. Klein currently rejects `--cache spectrum`.
@@ -89,7 +95,7 @@ loading the model, and loaded once per batch. The output size remains 512×512 b
 default, independently of input dimensions; set `--width` / `--height` explicitly.
 The default sampler, four steps and CFG 1 remain unchanged.
 
-By default sd.cpp preserves each reference's aspect ratio while resizing to
+By default pictor preserves each reference's aspect ratio while resizing to
 approximately `min(output_width * output_height, 1024 * 1024)` pixels, rounding
 each dimension to a multiple of 16. `--disable-auto-resize-ref-image` keeps native
 dimensions, which must then be multiples of 16. Inputs must be 1–4096 pixels per
@@ -115,7 +121,7 @@ pictor::Status generate_fox() {
     auto status = pictor::FluxKleinSession::create({
         "/path/flux-2-klein-4b-Q4_0.gguf",
         "/path/Qwen3-4B-Q4_K_M.gguf",
-        "/path/flux2-vae.safetensors",
+        "/path/full_encoder_small_decoder.safetensors",
     }, session);
     if (!status) return status;
     auto request = pictor::flux_klein_request();
@@ -134,8 +140,7 @@ Anima source and ABI entry points retain their behavior. Use `flux_klein_request
 instead of the Anima defaults; `validate_flux_klein_request()` also checks Klein's
 cache restriction. Generation clears the output image on error.
 
-Anima and Klein use the same private session implementation and **one process-wide
-backend mutex**. Concurrent calls serialize, and global sd.cpp callbacks remain
+Anima, ggml Klein and MLX Klein share **one process-wide backend mutex**. Concurrent calls serialize, and global sd.cpp callbacks remain
 scoped to the active call. Callbacks must not re-enter pictor. Returned images own
 their storage independently of the session. No model is reloaded between requests.
 
@@ -242,3 +247,81 @@ quantization formats/frameworks are not expected to agree pixel-for-pixel.
 For reference editing, add `-r source.png` (repeat for multiple references). Match
 `--disable-auto-resize-ref-image` when native reference sizing is selected.
 See [measured results and validation boundaries](validation.md).
+
+## Batches
+
+`--count` uses bounded native batches (8 images / 16777216 output pixels per batch),
+sharing text conditioning and all reference latents. C++ exposes `generate_batch`
+and `edit_batch`; C exposes `pictor_session_generate_batch` and
+`pictor_flux_klein_session_edit_batch`. Images use consecutive seeds and return
+together after decoding. The batch timing is explicit; each image's timing is an
+amortized average. This does not add a cross-request cache. See README for ownership.
+
+## Optional hidden-state compression (HS)
+
+**ggml-only, experimental and disabled by default.** This is an approximate acceleration mode for Klein, not a
+pixel-equivalent optimization. It can change fine details, text and reference
+fidelity. Treat visual inspection of your workload as part of choosing this mode.
+
+The current 512x512, four-step Q4 test produced **obvious repeated contours and
+striping**, despite passing numerical and API tests. Its generation time fell
+from 110.280 s to 92.168 s on an M4, but that result does not establish an acceptable
+quality/speed tradeoff. The original Python settings were selected for 2K work;
+larger-resolution quality in this ggml port has not yet been validated. Keep HS
+off for final-quality work unless your own comparisons justify enabling it.
+
+```cpp
+// On an existing FluxKleinSession; returns Status, like generation.
+auto status = session->set_hidden_state_compression(true);
+if (!status) { std::fprintf(stderr, "%s\n", status.message); return 1; }
+// generate(), edit(), generate_batch() and edit_batch() now use HS.
+// To restore the exact path:
+status = session->set_hidden_state_compression(false);
+```
+
+```c
+pictor_status status = pictor_flux_klein_session_set_hidden_state_compression(
+    session, 1, &error); /* 0 disables; reject any other value, NULL, or Anima */
+if (status != PICTOR_OK) { fprintf(stderr, "%s\n", error.message); return 1; }
+/* Existing generate/edit/batch calls apply the selected mode. */
+```
+
+Zig can call the same function by importing `pictor/pictor.h` with `@cImport`/`@cInclude`; Rust's
+updated example declares the function with `enabled: u32`. All existing C ABI v1
+struct layouts and generation signatures remain unchanged.
+
+The setting belongs to the session and persists until changed. Setter and inference
+use the shared backend lock. A setter waits for an active generation; it never
+changes an in-flight batch. Setting and then generating are two separate calls;
+callers sharing one session must coordinate if they require per-request modes.
+Callbacks must not call the setter or re-enter pictor.
+
+```sh
+zig-out/bin/pictor flux-klein -p "a red fox in a forest" \
+  --backend ggml --seed 666 --steps 4 --hs-compression --count 2 -o outputs/hs.png
+```
+
+CLI metadata records `hidden_state_compression`; verbose logs show compressed/full
+steps and the number of image tokens. Anima rejects this flag. A one-step request
+still uses the full path even when HS is enabled.
+
+Algorithm: for each Euler step except the last, pool 2x2 image tokens separately
+for the output and each reference in single-stream transformer blocks. Text tokens
+remain full length. Run the block on reduced tokens, expand only its image update,
+and add it to the original features. Text outputs come from the reduced block.
+Use representative existing rotary position embeddings, retaining each reference's
+positional identity. Double-stream blocks and the final Euler step remain full.
+The final full step does not undo the approximations in earlier steps.
+
+Unlike the original square-grid heuristic, this port uses actual latent dimensions.
+Non-square outputs, ordered references of different dimensions, and odd token-grid
+edges are supported. Partial 2x2 edge cells average their valid entries by repeating
+the final row/column; no padding from another image is included. Each batch image
+uses its own step schedule. There is no persistent activation cache.
+
+`zig build test` includes a scalar-reference comparison of pooling, position
+selection and residual expansion; Metal builds also compare that graph with CPU
+numerically. `zig build smoke-hs` checks real Metal inference,
+one-step equivalence, off/on/off recovery, odd rectangular multi-reference batch
+parity, and writes a 512x512 four-step comparison to `outputs/hs-smoke/`.
+Successful smoke execution verifies functionality, not visual quality.

@@ -1,0 +1,337 @@
+diff --git a/include/stable-diffusion.h b/include/stable-diffusion.h
+--- a/include/stable-diffusion.h
++++ b/include/stable-diffusion.h
+@@ -416,6 +416,8 @@
+ SD_API void sd_img_gen_params_init(sd_img_gen_params_t* sd_img_gen_params);
+ SD_API char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params);
+ SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_gen_params);
++// Pictor extension: opt-in Flux2 hidden-state compression; existing entry point stays exact.
++SD_API sd_image_t* generate_image_with_hs(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* params);
+ 
+ SD_API void sd_vid_gen_params_init(sd_vid_gen_params_t* sd_vid_gen_params);
+ SD_API sd_image_t* generate_video(sd_ctx_t* sd_ctx, const sd_vid_gen_params_t* sd_vid_gen_params, int* num_frames_out);
+diff --git a/src/stable-diffusion.cpp b/src/stable-diffusion.cpp
+--- a/src/stable-diffusion.cpp
++++ b/src/stable-diffusion.cpp
+@@ -1590,7 +1590,8 @@
+                              const sd::Tensor<float>& denoise_mask,
+                              const sd::Tensor<float>& vace_context,
+                              float vace_strength,
+-                             const sd_cache_params_t* cache_params) {
++                             const sd_cache_params_t* cache_params,
++                             bool flux_hidden_state_compression = false) {
+         std::vector<int> skip_layers(guidance.slg.layers, guidance.slg.layers + guidance.slg.layer_count);
+         float cfg_scale     = guidance.txt_cfg;
+         float img_cfg_scale = guidance.img_cfg;
+@@ -1659,6 +1660,12 @@
+             sd_sample::SampleStepCacheDispatcher step_cache(cache_runtime, step, sigma);
+             std::vector<sd::Tensor<float>> controls;
+             DiffusionParams diffusion_params;
++            diffusion_params.flux_hidden_state_compression =
++                sd_version_is_flux2(version) && method == EULER_SAMPLE_METHOD &&
++                FluxHS::active(flux_hidden_state_compression, step, static_cast<int>(steps));
++            if (flux_hidden_state_compression)
++                LOG_INFO("Klein HS step %d/%zu: %s", step, steps,
++                         diffusion_params.flux_hidden_state_compression ? "compressed" : "full");
+             diffusion_params.x                  = &noised_input;
+             diffusion_params.timesteps          = &timesteps_tensor;
+             diffusion_params.guidance           = &guidance_tensor;
+@@ -3364,7 +3371,7 @@
+     ~SamplingImageIndexGuard() { sampling_image_index = previous; }
+ };
+ 
+-SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_gen_params) {
++static sd_image_t* generate_image_impl(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_gen_params, bool hidden_state_compression) {
+     if (sd_ctx == nullptr || sd_img_gen_params == nullptr) {
+         return nullptr;
+     }
+@@ -3435,7 +3442,8 @@
+                                                    latents.denoise_mask,
+                                                    sd::Tensor<float>(),
+                                                    1.f,
+-                                                   request.cache_params);
++                                                   request.cache_params,
++                                                   hidden_state_compression);
+         int64_t sampling_end  = ggml_time_ms();
+         if (!x_0.empty()) {
+             LOG_INFO("sampling completed, taking %.2fs", (sampling_end - sampling_start) * 1.0f / 1000);
+@@ -3601,6 +3609,14 @@
+     return result;
+ }
+ 
++SD_API sd_image_t* generate_image(sd_ctx_t* ctx, const sd_img_gen_params_t* params) {
++    return generate_image_impl(ctx, params, false);
++}
++SD_API sd_image_t* generate_image_with_hs(sd_ctx_t* ctx, const sd_img_gen_params_t* params) {
++    return generate_image_impl(ctx, params, true);
++}
++
++
+ static std::optional<ImageGenerationLatents> prepare_video_generation_latents(sd_ctx_t* sd_ctx,
+                                                                               const sd_vid_gen_params_t* sd_vid_gen_params,
+                                                                               GenerationRequest* request) {
+diff --git a/src/diffusion_model.hpp b/src/diffusion_model.hpp
+--- a/src/diffusion_model.hpp
++++ b/src/diffusion_model.hpp
+@@ -13,6 +13,7 @@
+ #include "z_image.hpp"
+ 
+ struct DiffusionParams {
++    bool flux_hidden_state_compression = false;
+     const sd::Tensor<float>* x                        = nullptr;
+     const sd::Tensor<float>* timesteps                = nullptr;
+     const sd::Tensor<float>* context                  = nullptr;
+@@ -261,7 +262,8 @@
+                             tensor_or_empty(diffusion_params.guidance),
+                             diffusion_params.ref_latents ? *diffusion_params.ref_latents : empty_ref_latents,
+                             diffusion_params.increase_ref_index,
+-                            diffusion_params.skip_layers ? *diffusion_params.skip_layers : empty_skip_layers);
++                            diffusion_params.skip_layers ? *diffusion_params.skip_layers : empty_skip_layers,
++                            diffusion_params.flux_hidden_state_compression);
+     }
+ };
+ 
+diff --git a/src/flux.hpp b/src/flux.hpp
+--- a/src/flux.hpp
++++ b/src/flux.hpp
+@@ -5,6 +5,7 @@
+ #include <vector>
+ 
+ #include "common_dit.hpp"
++#include "flux_hs.hpp"
+ #include "model.h"
+ #include "rope.hpp"
+ 
+@@ -855,7 +856,8 @@
+                                   ggml_tensor* guidance,
+                                   ggml_tensor* pe,
+                                   ggml_tensor* mod_index_arange = nullptr,
+-                                  std::vector<int> skip_layers  = {}) {
++                                  std::vector<int> skip_layers  = {},
++                                  const FluxHS::Graph* hs = nullptr) {
+             auto img_in      = std::dynamic_pointer_cast<Linear>(blocks["img_in"]);
+             auto txt_in      = std::dynamic_pointer_cast<Linear>(blocks["txt_in"]);
+             auto final_layer = std::dynamic_pointer_cast<LastLayer>(blocks["final_layer"]);
+@@ -953,7 +955,14 @@
+                 }
+                 auto block = std::dynamic_pointer_cast<SingleStreamBlock>(blocks["single_blocks." + std::to_string(i)]);
+ 
+-                txt_img = block->forward(ctx, txt_img, vec, pe, txt_img_mask, ss_mods);
++                if (hs) {
++                    GGML_ASSERT(txt_img_mask == nullptr);
++                    auto reduced = hs->reduce(ctx->ggml_ctx, txt_img);
++                    auto updated = block->forward(ctx, reduced, vec, hs->pe, nullptr, ss_mods);
++                    txt_img = hs->expand_residual(ctx->ggml_ctx, txt_img, reduced, updated);
++                } else {
++                    txt_img = block->forward(ctx, txt_img, vec, pe, txt_img_mask, ss_mods);
++                }
+                 sd::ggml_graph_cut::mark_graph_cut(txt_img, "flux.single_blocks." + std::to_string(i), "txt_img");
+             }
+ 
+@@ -1067,7 +1076,8 @@
+                                          ggml_tensor* mod_index_arange         = nullptr,
+                                          ggml_tensor* dct                      = nullptr,
+                                          std::vector<ggml_tensor*> ref_latents = {},
+-                                         std::vector<int> skip_layers          = {}) {
++                                         std::vector<int> skip_layers          = {},
++                                  const FluxHS::Graph* hs = nullptr) {
+             GGML_ASSERT(x->ne[3] == 1);
+ 
+             int64_t W      = x->ne[0];
+@@ -1114,7 +1124,7 @@
+                 }
+             }
+ 
+-            auto out = forward_orig(ctx, img, context, timestep, y, guidance, pe, mod_index_arange, skip_layers);  // [N, num_tokens, C * patch_size * patch_size]
++            auto out = forward_orig(ctx, img, context, timestep, y, guidance, pe, mod_index_arange, skip_layers, hs);  // [N, num_tokens, C * patch_size * patch_size]
+ 
+             if (out->ne[1] > img_tokens) {
+                 out = ggml_view_3d(ctx->ggml_ctx, out, out->ne[0], img_tokens, out->ne[2], out->nb[1], out->nb[2], 0);
+@@ -1136,7 +1146,8 @@
+                              ggml_tensor* mod_index_arange         = nullptr,
+                              ggml_tensor* dct                      = nullptr,
+                              std::vector<ggml_tensor*> ref_latents = {},
+-                             std::vector<int> skip_layers          = {}) {
++                             std::vector<int> skip_layers          = {},
++                                  const FluxHS::Graph* hs = nullptr) {
+             // Forward pass of DiT.
+             // x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
+             // timestep: (N,) tensor of diffusion timesteps
+@@ -1172,12 +1183,13 @@
+                                            mod_index_arange,
+                                            dct,
+                                            ref_latents,
+-                                           skip_layers);
++                                           skip_layers, hs);
+             }
+         }
+     };
+ 
+     struct FluxRunner : public GGMLRunner {
++        FluxHS::Plan hs_plan; // Own index uploads through allocation and execution.
+     public:
+         FluxParams flux_params;
+         Flux flux;
+@@ -1368,7 +1380,8 @@
+                                  const sd::Tensor<float>& guidance_tensor                 = {},
+                                  const std::vector<sd::Tensor<float>>& ref_latents_tensor = {},
+                                  bool increase_ref_index                                  = false,
+-                                 std::vector<int> skip_layers                             = {}) {
++                                 std::vector<int> skip_layers                             = {},
++                                 bool hidden_state_compression = false) {
+             ggml_tensor* x         = make_input(x_tensor);
+             ggml_tensor* timesteps = make_input(timesteps_tensor);
+             ggml_tensor* context   = make_optional_input(context_tensor);
+@@ -1445,6 +1458,19 @@
+                 set_backend_tensor_data(dct, dct_vec.data());
+             }
+ 
++            FluxHS::Graph hs;
++            if (hidden_state_compression && sd_version_is_flux2(version)) {
++                std::vector<FluxHS::Grid> grids{{static_cast<int>(x->ne[0]), static_cast<int>(x->ne[1])}};
++                for (auto ref : ref_latents)
++                    grids.push_back({static_cast<int>(ref->ne[0]), static_cast<int>(ref->ne[1])});
++                hs_plan = FluxHS::make_plan(static_cast<int>(context->ne[1]), grids);
++                hs = FluxHS::make_graph(compute_ctx, hs_plan, pe, [&](ggml_tensor* tensor, const void* data) {
++                    set_backend_tensor_data(tensor, data);
++                });
++                LOG_DEBUG("Klein HS image tokens: %zu -> %zu (%zu separate grids)",
++                          hs_plan.restore.size(), hs_plan.pool[0].size(), grids.size());
++            }
++
+             auto runner_ctx = get_context();
+ 
+             ggml_tensor* out = flux.forward(&runner_ctx,
+@@ -1458,7 +1484,7 @@
+                                             mod_index_arange,
+                                             dct,
+                                             ref_latents,
+-                                            skip_layers);
++                                            skip_layers, hs.pe ? &hs : nullptr);
+ 
+             ggml_build_forward_expand(gf, out);
+ 
+@@ -1474,14 +1500,15 @@
+                                   const sd::Tensor<float>& guidance                 = {},
+                                   const std::vector<sd::Tensor<float>>& ref_latents = {},
+                                   bool increase_ref_index                           = false,
+-                                  std::vector<int> skip_layers                      = std::vector<int>()) {
++                                  std::vector<int> skip_layers                      = std::vector<int>(),
++                                 bool hidden_state_compression = false) {
+             // x: [N, in_channels, h, w]
+             // timesteps: [N, ]
+             // context: [N, max_position, hidden_size]
+             // y: [N, adm_in_channels] or [1, adm_in_channels]
+             // guidance: [N, ]
+             auto get_graph = [&]() -> ggml_cgraph* {
+-                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, skip_layers);
++                return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, skip_layers, hidden_state_compression);
+             };
+ 
+             auto result = restore_trailing_singleton_dims(GGMLRunner::compute<float>(get_graph, n_threads, false), x.dim());
+diff --git a/src/flux_hs.hpp b/src/flux_hs.hpp
+new file mode 100644
+--- /dev/null
++++ b/src/flux_hs.hpp
+@@ -0,0 +1,101 @@
++#ifndef PICTOR_FLUX_HS_HPP
++#define PICTOR_FLUX_HS_HPP
++
++#include "ggml.h"
++#include <algorithm>
++#include <array>
++#include <cstdint>
++#include <vector>
++
++// Pictor's port of ultra-fast-image-gen's 2x2 hidden-state residual compression.
++// Each image has its own rectangular grid. Odd edges repeat their final row/column
++// when pooling, so a partial cell averages only its valid pixels. Text stays intact.
++namespace FluxHS {
++struct Grid { int width; int height; };
++struct Plan {
++    int text_tokens = 0;
++    std::array<std::vector<int32_t>, 4> pool;
++    std::vector<int32_t> restore;
++    std::vector<int32_t> positions;
++};
++inline bool active(bool enabled, int step, int steps) {
++    return enabled && step > 0 && step < steps;
++}
++inline Plan make_plan(int text_tokens, const std::vector<Grid>& grids) {
++    GGML_ASSERT(text_tokens >= 0);
++    Plan plan;
++    plan.text_tokens = text_tokens;
++    for (int i = 0; i < text_tokens; ++i) plan.positions.push_back(i);
++    int image_offset = 0, low_offset = 0;
++    for (const auto& grid : grids) {
++        GGML_ASSERT(grid.width > 0 && grid.height > 0);
++        const int low_width = (grid.width + 1) / 2;
++        const int low_height = (grid.height + 1) / 2;
++        for (int y = 0; y < grid.height; y += 2) {
++            for (int x = 0; x < grid.width; x += 2) {
++                for (int dy = 0; dy < 2; ++dy)
++                    for (int dx = 0; dx < 2; ++dx)
++                        plan.pool[dy * 2 + dx].push_back(image_offset +
++                            std::min(y + dy, grid.height - 1) * grid.width + std::min(x + dx, grid.width - 1));
++                plan.positions.push_back(text_tokens + plan.pool[3].back());
++            }
++        }
++        for (int y = 0; y < grid.height; ++y)
++            for (int x = 0; x < grid.width; ++x)
++                plan.restore.push_back(low_offset + (y / 2) * low_width + x / 2);
++        image_offset += grid.width * grid.height;
++        low_offset += low_width * low_height;
++    }
++    return plan;
++}
++
++struct Graph {
++    int text_tokens = 0;
++    std::array<ggml_tensor*, 4> pool{};
++    ggml_tensor* restore = nullptr;
++    ggml_tensor* pe = nullptr;
++
++    ggml_tensor* image_slice(ggml_context* ctx, ggml_tensor* x) const {
++        GGML_ASSERT(x->ne[2] == 1 && x->ne[3] == 1);
++        return ggml_view_2d(ctx, x, x->ne[0], x->ne[1] - text_tokens, x->nb[1], text_tokens * x->nb[1]);
++    }
++    ggml_tensor* join_text(ggml_context* ctx, ggml_tensor* source, ggml_tensor* image) const {
++        if (text_tokens == 0) return image;
++        auto text = ggml_view_2d(ctx, source, source->ne[0], text_tokens, source->nb[1], 0);
++        return ggml_concat(ctx, text, image, 1);
++    }
++    ggml_tensor* reduce(ggml_context* ctx, ggml_tensor* x) const {
++        auto image = image_slice(ctx, x);
++        auto top = ggml_add(ctx, ggml_get_rows(ctx, image, pool[0]), ggml_get_rows(ctx, image, pool[1]));
++        auto bottom = ggml_add(ctx, ggml_get_rows(ctx, image, pool[2]), ggml_get_rows(ctx, image, pool[3]));
++        return join_text(ctx, x, ggml_scale(ctx, ggml_add(ctx, top, bottom), 0.25f));
++    }
++    ggml_tensor* expand_residual(ggml_context* ctx, ggml_tensor* original,
++                                  ggml_tensor* reduced, ggml_tensor* updated) const {
++        auto delta = ggml_sub(ctx, image_slice(ctx, updated), image_slice(ctx, reduced));
++        auto restored = ggml_add(ctx, image_slice(ctx, original), ggml_get_rows(ctx, delta, restore));
++        return join_text(ctx, updated, restored);
++    }
++};
++
++// Upload callbacks must retain the Plan's storage until graph execution finishes.
++template<class Upload>
++Graph make_graph(ggml_context* ctx, const Plan& plan, ggml_tensor* pe, Upload upload) {
++    Graph graph;
++    graph.text_tokens = plan.text_tokens;
++    auto indices = [&](const std::vector<int32_t>& values) {
++        auto tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, values.size());
++        upload(tensor, values.data());
++        return tensor;
++    };
++    for (int i = 0; i < 4; ++i) graph.pool[i] = indices(plan.pool[i]);
++    graph.restore = indices(plan.restore);
++    GGML_ASSERT(pe->ne[3] == static_cast<int64_t>(plan.restore.size()) + plan.text_tokens);
++    auto positions = indices(plan.positions);
++    auto flat_pe = ggml_reshape_2d(ctx, pe, pe->ne[0] * pe->ne[1] * pe->ne[2], pe->ne[3]);
++    graph.pe = ggml_reshape_4d(ctx, ggml_get_rows(ctx, flat_pe, positions),
++                               pe->ne[0], pe->ne[1], pe->ne[2], plan.positions.size());
++    return graph;
++}
++} // namespace FluxHS
++#endif

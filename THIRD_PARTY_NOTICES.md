@@ -8,6 +8,12 @@
   Source and license: `vendor/stable-diffusion.cpp/LICENSE`.
   Pictor additionally applies `patches/sd-model-progress-callback.patch` to keep
   split-file loader output quiet when a caller installs a progress callback.
+  `patches/sd-sampling-image-index.patch` adds a thread-local sampling-index query
+  so batch progress can distinguish sampling from VAE tiling without parsing logs.
+  `patches/sd-flux-hidden-state-compression.patch` adds opt-in Klein compression:
+  the ggml implementation follows the 2x2 residual-update algorithm in
+  `ultra-fast-image-gen/flux2_sdnq_hs.py`, with explicit per-image rectangular grids
+  and partial edge cells. It does not change upstream defaults or existing ABI layouts.
 - **ggml**, license in `vendor/stable-diffusion.cpp/ggml/LICENSE`.
 - **stb_image_write**, used from the pinned sd.cpp checkout. Its MIT/public-domain
   dual-license text is embedded in `vendor/stable-diffusion.cpp/thirdparty/stb_image_write.h`.
@@ -25,3 +31,11 @@
 
 The native library links upstream dependencies. Preserve their license notices
 when distributing binaries. This file does not relicense any source or model.
+
+## MLX and MFLUX
+
+Native Klein on Apple Silicon links MLX 0.32.2 (Apple, MIT license); its runtime
+license is installed alongside pictor. The C++ Qwen3, Klein and Flux2 VAE
+implementations in `src/mlx/` are adapted from MFLUX 0.20.0 (Filip Strand, MIT license), with native tokenization, reference preparation and
+pictor sampling integration. See `licenses/mflux.txt`. Python/MFLUX is used only
+for reference tests; it is not loaded by the inference library.

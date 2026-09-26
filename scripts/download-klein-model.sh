@@ -35,3 +35,6 @@ download unsloth/Qwen3-4B-GGUF 22c9fc8a8c7700b76a1789366280a6a5a1ad1120 \
     Qwen3-4B-Q4_K_M.gguf f6f851777709861056efcdad3af01da38b31223a3ba26e61a4f8bf3a2195813a
 download Comfy-Org/vae-text-encorder-for-flux-klein-4b 5f526678002e43af5551dadb73ce2e8c91b43afe \
     split_files/vae/flux2-vae.safetensors 868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3
+
+# Small Decoder is the CLI default; retain the original VAE for comparisons.
+bash "$root/scripts/download-small-decoder.sh" "$directory"

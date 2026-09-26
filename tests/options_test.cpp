@@ -24,6 +24,9 @@ void rejects(const std::vector<std::string>& args) {
 
 int main() {
     using namespace pictor;
+    require(!parse({"flux-klein", "-p", "cat"}).hidden_state_compression, "HS must default off");
+    require(parse({"flux-klein", "-p", "cat", "--backend", "ggml", "--hs-compression"}).hidden_state_compression, "HS flag");
+    rejects({"anima", "-p", "cat", "--hs-compression"});
     auto options = parse({"anima", "-p", "a cat"});
     require(options.request.width == 512 && options.request.height == 768, "default resolution");
     require(options.request.steps == 8 && options.request.cache == CacheMode::spectrum, "balanced preset");
@@ -66,6 +69,15 @@ int main() {
     require(options.model == cli::Model::flux_klein, "Klein command");
     require(options.request.width == 512 && options.request.height == 512 && options.request.steps == 4 &&
             options.request.cache == CacheMode::none && options.request.cfg_scale == 1, "Klein defaults");
+    require(options.vae.filename()=="full_encoder_small_decoder.safetensors", "Small Decoder default");
+#ifdef PICTOR_DEFAULT_MLX
+    require(options.session.model_path=="models/mlx-flux2-klein-4b-4bit/transformer", "Apple Silicon MLX default");
+#endif
+    require(parse({"flux-klein","-p","fox","--backend","ggml"}).session.model_path.extension()==".gguf", "ggml fallback defaults");
+    require(parse({"flux-klein","-p","fox","--backend","mlx"}).text_encoder.filename()=="text_encoder", "explicit MLX defaults");
+    rejects({"flux-klein","-p","fox","--backend","other"});
+    rejects({"anima","-p","fox","--backend","mlx"});
+    rejects({"flux-klein","-p","fox","--backend","mlx","--hs-compression"});
     options = parse({"flux-klein", "-p", "a fox", "--diffusion-model", "dit.gguf", "--text-encoder", "te.gguf", "--vae", "vae.safetensors", "--steps", "6", "--threads", "2"});
     require(options.session.model_path == "dit.gguf" && options.text_encoder == "te.gguf" && options.vae == "vae.safetensors" && options.request.steps == 6 && options.session.threads == 2, "Klein split model flags");
     require(parse({"flux-klein", "-p", "fox", "--llm", "alias.gguf"}).text_encoder == "alias.gguf", "LLM alias");

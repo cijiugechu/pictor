@@ -239,3 +239,104 @@ not describe this M4 run.
   is expected on this M4; the normal Metal backend was used successfully.
 - The dependency emits existing compiler warnings. No upstream model code was
   modified beyond the original bundled Metal patch.
+
+## Native batch follow-up (2026-09-26)
+
+- Added Anima/Klein C++ batches, C ABI batches and CLI chunking. Bounds: 8 images
+  and 16777216 total output pixels. Existing single-image APIs/layouts remain.
+- Stand-in tests exercise consecutive/random/overflow seeds, one backend call per
+  batch, reference order and borrowed-input lifetime, invalid final images,
+  no partial outputs, C handle ownership after session destruction and callback
+  indices excluding VAE events. CLI checks cover 9 images split 8+1, metadata,
+  filenames and reference batches. ASan/UBSan stand-in run passes. CPU build,
+  API tests and Zig/Rust consumers pass all 53/53 build steps; the final Metal
+  run also passes 53/53 with the updated batch FFI bindings.
+- Real Metal Anima, 256x256, seeds 42/43, same resident session: both Fast
+  (3 steps, CFG 1, Spectrum) and CFG 2 + negative prompt + cache disabled match
+  individual calls and subsequent repeats exactly in RGB bytes. Text conditioning
+  takes about 0.06–0.22 s here; batch reuse removes one repeat but does not establish
+  an end-to-end speedup above run variation.
+
+| Anima workload | Two single calls before | Native batch of 2 | Two single calls after |
+| --- | ---: | ---: | ---: |
+| Fast / CFG 1 / Spectrum | 27.578 s | 26.638 s | 25.268 s |
+| CFG 2 / negative prompt / no cache | 35.564 s | 37.160 s | 35.171 s |
+
+These are development observations, not controlled benchmarks (other build work
+may run on the host). Model loading is excluded. Reproduce with
+`zig build smoke-batch -- --anima` and `zig build smoke-batch -- --klein`.
+
+Klein text-to-image, 256x256, 4 steps, CFG 1, seeds 42/43: exact RGB parity for
+the batch and subsequent individual calls. Timings: serial-before 124.430 s,
+batch 81.705 s, serial-after 99.612 s. The batch encodes text once (4.96 s),
+but sampling itself also varied substantially; do not attribute the entire
+wall-time difference to encoding reuse.
+
+Klein double-reference editing uses the two text outputs as ordered references,
+with VAE tiling enabled. The native batch matches the individual baseline images
+exactly; sampling callbacks report the correct indices despite VAE tile events.
+Reference VAE preparation and text conditioning each execute once per native
+batch (3.24 s and 6.03 s respectively in this run).
+
+The two subsequent individual edits also match exactly, completing the same-session
+reuse check. Two-image times: serial-before 189.717 s, native batch 178.796 s,
+serial-after 190.771 s (about 6% less elapsed time in this particular 256² example).
+This is one development run, not a general speedup guarantee. Both model smoke
+commands completed successfully.
+
+## Experimental Klein hidden-state compression (2026-09-26)
+
+- Default off; additive C++/C session setter, Zig/Rust declaration checks and CLI
+  flag. Existing public C ABI v1 layouts/signatures stay unchanged. Applies to
+  text generation, reference editing and native batches; Anima rejects opt-in.
+- Metal and CPU tests/FFI pass 56/56 build steps each. Scalar-reference tests cover
+  pooling, rotary-position selection, residual restoration, odd rectangular grids
+  and independent references. A copy of the same graph on Metal matches every
+  contiguous F32 node from CPU exactly. This verifies the compression primitives,
+  not equivalence of full model inference between backends.
+- Real Metal checks: one-step on/off pixel equality; multi-step off/on/off restores
+  exact pixels; 80x112 output with 80x64 and 112x80 references, native reference
+  sizing and tiled VAE preserves two-seed batch/individual equality. Both inputs
+  remain unchanged. Each image resets the compression schedule.
+- 512x512, four Euler steps, CFG 1, seed 666, resident Q4 Klein model: first three
+  steps reduce image tokens 1024 to 256; last step stays full. Off output matches
+  the pre-change `outputs/klein-reference.png` in every RGB byte.
+
+| 512px fox comparison | HS off | HS on |
+| --- | ---: | ---: |
+| Generation, excluding model loading | 110.280 s | 92.168 s |
+| Sampling | 91.02 s | 71.80 s |
+| VAE decode | 13.97 s | 14.71 s |
+
+One paired run on Apple M4; about 16.4% less generation time, not a general speedup
+guarantee. No concurrent build ran during this pair. Prompt: `A small red fox
+sitting on a mossy rock in a sunlit forest, detailed fur, soft natural light`.
+Outputs: `outputs/hs-smoke/exact.png` and `outputs/hs-smoke/hs.png`.
+
+**Visual quality is not acceptable in this test:** HS introduces obvious repeated
+facial/body contours and striping. RGB MAE 29.7478 and PSNR 15.458 dB measure the
+pixel difference only. The original Python algorithm's settings were chosen for
+2K images; the ggml port's high-resolution quality is unvalidated. Numerical graph
+parity and code inspection found no discrepancy in the pooling/restoration
+primitives, but do not establish the cause of all model-level artifacts. This
+feature remains explicitly experimental, disabled by default, and unsuitable as
+a general quality-preserving preset. `smoke-hs` success is a functional check, not
+a visual-quality approval.
+
+Clean pinned-source replay of all three sd.cpp patches reproduces the working
+backend byte-for-byte, and each patch's reverse check remains idempotent.
+
+
+## Native MLX integration
+
+Apple Silicon default Klein now uses native MLX and Small Decoder; ggml remains
+selectable. Real `zig build smoke-mlx` validates C++/C pixel parity, batch-vs-single
+seeds, reference batches/multiple references, aliased input/output lifetime,
+Unicode, CFG, tiled decoding and error recovery. `scripts/check-mlx-parity.py`
+compares all text/transformer/original-VAE/Small-VAE tensors and token fixtures
+with pinned MFLUX; all elements match. A 512²/four-step original-VAE generation
+also matches the earlier aligned MFLUX image exactly. A relocated bin/lib tree
+successfully performs text generation and reference editing without Python.
+
+Metal tests/FFI plus benchmark build: 69/69 steps. CPU with MLX disabled: 59/59 steps. Native MLX and
+Small Decoder workflows, numerical fixtures and limits are in [mlx.md](mlx.md).

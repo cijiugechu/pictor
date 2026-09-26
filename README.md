@@ -1,15 +1,15 @@
 # pictor
 
 C++ inference library with a C ABI and CLI for **Anima P3 Turbo AIO Q4** and
-**FLUX.2-klein-4B**, using a pinned
-stable-diffusion.cpp backend. Zig directly builds the C++ library, CLI, and tests
+**FLUX.2-klein-4B**. Apple Silicon defaults to native MLX for Klein and a pinned
+stable-diffusion.cpp backend for Anima; Klein also supports explicit ggml selection. Zig directly builds the C++ library, CLI, and tests
 and owns installation. Only the upstream sd.cpp/ggml dependency uses CMake/Ninja
 and the platform toolchain for its C++/Metal code. No Python runtime or HTTP server.
 
 ## Build
 
 On Apple Silicon, install Zig **0.16.0**, CMake, Ninja, Git, and Xcode Command Line
-Tools (or Xcode). Metal is enabled by default on macOS.
+Tools (or Xcode), plus `uv` for the first MLX dependency preparation. Metal is enabled by default on macOS.
 
 ```sh
 zig build
@@ -23,14 +23,15 @@ model weights are **not** downloaded by building or testing.
 
 Outputs are `zig-out/bin/pictor`, `zig-out/lib/libpictor.dylib`, and
 `zig-out/lib/libstable-diffusion.dylib` on macOS, plus public headers in
-`zig-out/include/pictor`. Keep `bin` and both libraries together when
-moving an installation. Metal shader source is embedded in the library.
+`zig-out/include/pictor`. Keep `bin` and the libraries together when
+moving an installation. MLX builds also install `libmlx.dylib` and `mlx.metallib`; keep both in `lib`. sd.cpp Metal shaders are embedded.
 
 ```sh
 zig build -Djobs=8                         # upstream CMake jobs (default: 4)
 zig build -j8                             # Zig project build parallelism
 zig build -Doptimize=Debug                 # default: ReleaseFast
-zig build -Dbackend=cpu                    # separate native build directory
+zig build -Dbackend=cpu                    # separate build, MLX disabled by default
+zig build -Dmlx=false                      # Metal sd.cpp-only build
 zig build --prefix /absolute/install/path
 ```
 
@@ -74,8 +75,11 @@ see the model repository for terms. Weights are not committed to this repository
 
 ## FLUX.2-klein-4B
 
-Klein 4B distilled generation and reference editing use three split weights (about 5.3 GB total):
-Q4 diffusion model, Q4 Qwen3 text encoder, and Flux2 VAE.
+Klein defaults to native MLX 4-bit diffusion/text weights and the official Small
+Decoder on Apple Silicon. Philox noise and Euler/discrete sampling preserve the
+validated aligned mode. C++ and C ABI generation, reference editing and batch
+calls all support MLX. See [native MLX setup, API and fallback](docs/mlx.md).
+Explicit GGUF paths or `--backend ggml` retain the sd.cpp path.
 
 ```sh
 zig build download-klein-model
@@ -95,7 +99,7 @@ Repeat `--ref-image` / `-r` for up to four ordered PNG/JPEG inputs. Editing defa
 to aspect-preserving reference resizing; output dimensions remain explicit.
 The same session supports both `generate()` and `edit()`. The additive C edit API
 accepts borrowed RGB8 buffers, usable from Zig/Rust without file I/O.
-Masked inpainting, 9B/base variants and MLX/SDNQ accelerations are outside this scope.
+Masked inpainting, 9B/base variants and SDNQ weights are outside this scope.
 
 ## Generate
 
@@ -120,7 +124,7 @@ to `models/Anima-P3-Turbo-AIO-Q4_K.gguf` relative to the current directory.
 is an approximation; use `--cache none` for comparisons. CFG 1 normally skips
 the negative/unconditional pass. `--vae-tiling` can reduce decoding memory.
 
-Generate multiple images while loading the model only once:
+Generate multiple images with one model load and shared conditioning per batch:
 
 ```sh
 zig-out/bin/pictor anima --prompt "anime landscape, sunset" \
@@ -130,7 +134,16 @@ zig-out/bin/pictor anima --prompt "anime landscape, sunset" \
 This writes `sunset-001.png` and `sunset-002.png` with seeds 666 and 667. With a
 random seed (`-1`), the CLI resolves one base seed and increments it. Every PNG
 has a JSON sidecar recording effective settings, seed, model path, backend
-revision, load time, and generation time. Existing outputs require `--overwrite`.
+revision, load time, batch time and amortized per-image generation time. Existing outputs require `--overwrite`.
+Anima reuses text conditioning (including the negative prompt when CFG requires it).
+Klein additionally reuses reference-image encodings for editing. Sampling still runs
+serially; this does not cache conditioning across requests or accelerate a single image.
+The CLI splits `--count` into batches of at most 8 images and 16 megapixels of total
+output. Each batch returns/saves all images after decoding, so the first PNG arrives
+later than with individual calls. Batches retain multiple latents and decoded images;
+the pixel cap bounds accumulation, not total model/backend memory.
+Sidecars identify `generation_seconds_kind: "batch_average"`, `batch_count` and
+`batch_generation_seconds`; `generation_seconds` is that batch time divided by its count.
 PNG paths go to stdout; status/progress/backend diagnostics go to stderr.
 
 Logging uses pinned **spdlog 1.17.0** (header-only, bundled fmt). Application
@@ -179,12 +192,30 @@ construction to `create`, pass an output `Image` to `generate`, and check status
 The C++ session/request/image types remain available. Callbacks are now a
 `noexcept` function pointer plus `void* userdata`, instead of `std::function`.
 
-Pictor library code, CLI, and test consumers compile with `-fno-exceptions`;
-spdlog/fmt use their no-exception modes. `src/backend.cpp` is the one deliberate
-exception-enabled production translation unit: it contains sd.cpp exceptions and
-converts them to status codes. The upstream backend and optional upstream CLI
-retain their original exception support. Filesystem I/O uses error-code overloads;
-CLI numeric parsing and OS random-seed generation also report errors explicitly.
+For a batch, both session types expose `generate_batch(request, count, result)`;
+Klein also exposes `edit_batch(edit_request, count, result)`. Single-image methods
+remain available. `BatchResult` owns its images and whole-batch `generation_seconds`:
+
+```cpp
+pictor::BatchResult batch;
+auto status = session->generate_batch(request, 2, batch);
+if (!status) { std::fprintf(stderr, "%s\n", status.message); return 1; }
+// batch.images[0/1] own RGB8 pixels and carry seeds request.seed + 0/1.
+// Image::generation_seconds is the batch average, not measured image latency.
+```
+
+Batch calls accept 1..8 images and at most 16777216 output pixels in total. Seed
+`-1` resolves one random starting seed; sequence overflow is rejected. Outputs are
+cleared on failure. `BatchProgressCallback` reports the zero-based image index and
+sampling step; it excludes reference encoding and VAE decoding/tiling events.
+
+Public wrappers, CLI, and test consumers compile with `-fno-exceptions`;
+spdlog/fmt use their no-exception modes there. The private sd.cpp boundary
+(`src/backend.cpp`) and native MLX implementation contain runtime exceptions and
+convert them to status codes before returning to the public API. The upstream
+backend and optional upstream CLI retain their exception support. Public-path
+filesystem I/O, CLI numeric parsing and OS random-seed generation report errors
+explicitly.
 
 This is explicit handling of recoverable errors, not a guarantee of recovery from
 all allocation failures: retained STL containers can terminate on OOM, spdlog's
@@ -217,6 +248,22 @@ validation, session creation/generation/destruction, image inspection and PNG ou
   panic. Backend calls are serialized across sessions; do not destroy a handle
   while another call is using it. Do not mix direct sd.cpp calls with pictor.
 
+The additive ABI v1 batch entry points are `pictor_session_generate_batch` (both
+models) and `pictor_flux_klein_session_edit_batch`. Pass an array of `count` NULL
+image handles and a `double*` for whole-batch seconds. On failure the slots remain
+unchanged and seconds is zero; on success destroy every returned image separately.
+The existing request layouts, image functions and single-image calls are unchanged.
+
+```c
+pictor_image* images[2] = {NULL, NULL};
+double batch_seconds = 0;
+pictor_status status = pictor_session_generate_batch(
+    session, &request, 2, NULL, NULL, images, &batch_seconds, &error);
+if (status != PICTOR_OK) { fprintf(stderr, "%s\n", error.message); return 1; }
+/* Inspect or write images[0] and images[1] using existing image functions. */
+for (int i = 0; i < 2; ++i) pictor_image_destroy(images[i]);
+```
+
 Working consumers are in [`examples/anima.zig`](examples/anima.zig) (`@cImport`)
 and [`examples/anima.rs`](examples/anima.rs) (`repr(C)` / `extern "C"`, no crates).
 Both include progress userdata, pixel access, error handling, and handle cleanup.
@@ -246,6 +293,26 @@ example contains the declarations needed for its flow. Copy both dynamic librari
 when packaging either consumer. C++ consumers must use a compatible C++ runtime;
 C ABI consumers do not need C++ headers.
 
+For Small Decoder, resident timing, Metal System Trace and MLX comparison experiments,
+see [the reproducible benchmark guide](docs/benchmarking.md).
+
+### Optional Klein hidden-state compression
+
+HS is **experimental and off by default**. A 512px test showed obvious repeated
+contours/striping, so this is not a quality-preserving speed preset. Enable it for an existing
+C++ Klein session with `set_hidden_state_compression(true)`, or call
+`pictor_flux_klein_session_set_hidden_state_compression(session, 1, &error)` from
+C/Zig/Rust. Disable with `false` / `0`. The setting applies to subsequent text,
+reference-edit and batch calls; Anima does not support it. Existing ABI layouts
+and default generation paths are unchanged.
+
+CLI: add `--hs-compression` to `pictor flux-klein`. The fixed mode pools 2x2 image
+tokens in single-stream blocks for the first N-1 Euler steps, leaving the last
+step full. It handles each rectangular reference grid independently and preserves
+full-resolution residuals. A one-step request stays exact. See
+[the Klein guide](docs/klein.md#optional-hidden-state-compression-hs) for API examples,
+session/concurrency semantics and quality limitations.
+
 ## Verification
 
 ```sh
@@ -254,6 +321,9 @@ zig build test-ffi              # no weights: Zig/Rust consumers (requires rustc
 zig build smoke-c               # Anima weights: C callbacks, reuse, ownership, PNG
 zig build smoke-klein           # Klein weights: resident C++/C ABI parity
 zig build smoke-klein-edit      # Klein weights + outputs/klein-reference.png: edit parity/reuse
+zig build smoke-hs              # Klein weights: HS geometry, toggling and visual A/B
+zig build smoke-batch -- --anima # Anima native batch parity/timing
+zig build smoke-batch -- --klein # Klein text + two-reference batch parity/timing
 zig build smoke                 # weights required: repeated in-process generation
 zig build smoke -- /path/model.gguf outputs/smoke
 zig build reference             # optional upstream sd-cli, without the HTTP server

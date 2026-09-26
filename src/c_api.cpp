@@ -13,6 +13,11 @@ struct pictor_session {
                            pictor::ProgressCallback progress, void* userdata) noexcept {
         return value ? value->generate(request, image, progress, userdata) : klein->generate(request, image, progress, userdata);
     }
+    pictor::Status generate_batch(const pictor::GenerationRequest& request, int count, pictor::BatchResult& output,
+                                 pictor::BatchProgressCallback progress, void* userdata) noexcept {
+        return value ? value->generate_batch(request, count, output, progress, userdata)
+                     : klein->generate_batch(request, count, output, progress, userdata);
+    }
 };
 struct pictor_image { pictor::Image value; };
 
@@ -43,6 +48,66 @@ Status convert_request(const pictor_request* input, pictor::GenerationRequest& o
               input->cache == PICTOR_CACHE_NONE ? pictor::CacheMode::none : pictor::CacheMode::spectrum,
               input->vae_tiling != 0};
     return pictor::validate_request(output);
+}
+
+Status convert_edit(const pictor_request* request, const pictor_flux_klein_edit_options* options,
+                    pictor::FluxKleinEditRequest& value) noexcept {
+    if (!options || options->struct_size != sizeof(*options) || options->auto_resize > 1 ||
+        !options->reference_images || options->reference_images_count < 1 || options->reference_images_count > 4)
+        return failure(ErrorCode::invalid_argument, "invalid Klein edit options; expected 1..4 references");
+    if (const auto status = convert_request(request, value.generation); !status) return status;
+    value.auto_resize = options->auto_resize != 0;
+    for (size_t i = 0; i < options->reference_images_count; ++i) {
+        const auto& ref = options->reference_images[i];
+        if (ref.struct_size != sizeof(ref))
+            return failure(ErrorCode::invalid_argument, "invalid reference image struct_size");
+        value.reference_images.push_back({ref.width, ref.height, ref.pixels, ref.pixels_len});
+    }
+    return pictor::validate_flux_klein_edit_request(value);
+}
+
+struct BatchCallback {
+    pictor_batch_progress_callback function;
+    void* userdata;
+    static void invoke(const pictor::BatchProgress& value, void* data) noexcept {
+        const auto& self = *static_cast<const BatchCallback*>(data);
+        self.function(value.image_index, value.image_count, value.sampling.step, value.sampling.steps,
+                      value.sampling.seconds, self.userdata);
+    }
+};
+
+pictor_status generate_batch(pictor_session* session, const pictor_request* request,
+    const pictor_flux_klein_edit_options* options, bool edit, int32_t count,
+    pictor_batch_progress_callback progress, void* userdata, pictor_image** outputs,
+    double* batch_seconds, pictor_error* error) noexcept {
+    if (batch_seconds) *batch_seconds = 0;
+    if (!session || !outputs || !batch_seconds || count < 1 || count > pictor::max_batch_count)
+        return finish(failure(ErrorCode::invalid_argument, "invalid batch session, outputs, timing pointer or count"), error);
+    for (int i = 0; i < count; ++i)
+        if (outputs[i]) return finish(failure(ErrorCode::invalid_argument, "all batch image slots must be NULL"), error);
+    if (edit && !session->klein)
+        return finish(failure(ErrorCode::invalid_argument, "reference editing requires a Klein session"), error);
+    pictor::FluxKleinEditRequest value;
+    const auto converted = edit ? convert_edit(request, options, value) : convert_request(request, value.generation);
+    if (!converted) return finish(converted, error);
+    if (const auto status = pictor::validate_batch_request(value.generation, count); !status) return finish(status, error);
+    std::unique_ptr<pictor_image> handles[pictor::max_batch_count];
+    for (int i = 0; i < count; ++i) {
+        handles[i].reset(new (std::nothrow) pictor_image);
+        if (!handles[i]) return finish(failure(ErrorCode::out_of_memory, "cannot allocate batch image handle"), error);
+    }
+    pictor::BatchResult result;
+    BatchCallback callback{progress, userdata};
+    const auto function = progress ? BatchCallback::invoke : nullptr;
+    const auto status = edit ? session->klein->edit_batch(value, count, result, function, &callback)
+                             : session->generate_batch(value.generation, count, result, function, &callback);
+    if (!status) return finish(status, error);
+    for (int i = 0; i < count; ++i) {
+        handles[i]->value = std::move(result.images[i]);
+        outputs[i] = handles[i].release();
+    }
+    *batch_seconds = result.generation_seconds;
+    return finish({}, error);
 }
 
 struct Callback {
@@ -111,6 +176,21 @@ pictor_status pictor_flux_klein_request_init(pictor_request* output, size_t size
 }
 
 pictor_status pictor_flux_klein_session_create(const pictor_flux_klein_options* options, pictor_session** output, pictor_error* error) noexcept {
+    return pictor_flux_klein_session_create_with_backend(options, PICTOR_KLEIN_BACKEND_AUTO, output, error);
+}
+
+pictor_status pictor_flux_klein_session_backend(const pictor_session* session, pictor_klein_backend* output, pictor_error* error) noexcept {
+    if (output) *output = PICTOR_KLEIN_BACKEND_AUTO;
+    if (!session || !session->klein || !output)
+        return finish(failure(ErrorCode::invalid_argument, "expected a Klein session and backend output"), error);
+    *output = static_cast<pictor_klein_backend>(session->klein->backend());
+    return finish({}, error);
+}
+
+pictor_status pictor_flux_klein_session_create_with_backend(const pictor_flux_klein_options* options, pictor_klein_backend backend,
+                                                          pictor_session** output, pictor_error* error) noexcept {
+    if (backend < PICTOR_KLEIN_BACKEND_AUTO || backend > PICTOR_KLEIN_BACKEND_MLX)
+        return finish(failure(ErrorCode::invalid_argument, "invalid Klein backend"), error);
     if (!output || *output)
         return finish(failure(ErrorCode::invalid_argument, "session output must point to NULL"), error);
     if (!options || options->struct_size != sizeof(*options) || !options->diffusion_model_path ||
@@ -119,7 +199,7 @@ pictor_status pictor_flux_klein_session_create(const pictor_flux_klein_options* 
     auto session = std::unique_ptr<pictor_session>(new (std::nothrow) pictor_session);
     if (!session) return finish(failure(ErrorCode::out_of_memory, "cannot allocate session handle"), error);
     const auto status = pictor::FluxKleinSession::create({options->diffusion_model_path, options->text_encoder_path,
-        options->vae_path, options->threads, options->verbose != 0}, session->klein);
+        options->vae_path, options->threads, options->verbose != 0}, static_cast<pictor::KleinBackend>(backend), session->klein);
     if (status) *output = session.release();
     return finish(status, error);
 }
@@ -138,6 +218,13 @@ pictor_status pictor_flux_klein_edit_options_init(pictor_flux_klein_edit_options
     return finish({}, error);
 }
 
+pictor_status pictor_flux_klein_session_set_hidden_state_compression(pictor_session* session,
+    uint32_t enabled, pictor_error* error) noexcept {
+    if (!session || !session->klein || enabled > 1)
+        return finish(failure(ErrorCode::invalid_argument, "expected a Klein session and enabled=0 or 1"), error);
+    return finish(session->klein->set_hidden_state_compression(enabled != 0), error);
+}
+
 pictor_status pictor_flux_klein_session_edit(pictor_session* session, const pictor_request* request,
     const pictor_flux_klein_edit_options* options, pictor_progress_callback progress, void* userdata,
     pictor_image** output, pictor_error* error) noexcept {
@@ -145,19 +232,8 @@ pictor_status pictor_flux_klein_session_edit(pictor_session* session, const pict
         return finish(failure(ErrorCode::invalid_argument, "image output must point to NULL"), error);
     if (!session || !session->klein)
         return finish(failure(ErrorCode::invalid_argument, "reference editing requires a Klein session"), error);
-    if (!options || options->struct_size != sizeof(*options) || options->auto_resize > 1 ||
-        !options->reference_images || options->reference_images_count < 1 || options->reference_images_count > 4)
-        return finish(failure(ErrorCode::invalid_argument, "invalid Klein edit options; expected 1..4 references"), error);
     pictor::FluxKleinEditRequest value;
-    if (const auto status = convert_request(request, value.generation); !status) return finish(status, error);
-    value.auto_resize = options->auto_resize != 0;
-    for (size_t i = 0; i < options->reference_images_count; ++i) {
-        const auto& ref = options->reference_images[i];
-        if (ref.struct_size != sizeof(ref))
-            return finish(failure(ErrorCode::invalid_argument, "invalid reference image struct_size"), error);
-        value.reference_images.push_back({ref.width, ref.height, ref.pixels, ref.pixels_len});
-    }
-    if (const auto status = pictor::validate_flux_klein_edit_request(value); !status) return finish(status, error);
+    if (const auto status = convert_edit(request, options, value); !status) return finish(status, error);
     auto image = std::unique_ptr<pictor_image>(new (std::nothrow) pictor_image);
     if (!image) return finish(failure(ErrorCode::out_of_memory, "cannot allocate image handle"), error);
     Callback callback{progress, userdata};
@@ -179,6 +255,18 @@ pictor_status pictor_session_generate(pictor_session* session, const pictor_requ
     const auto status = session->generate(value, image->value, progress ? Callback::invoke : nullptr, &callback);
     if (status) *output = image.release();
     return finish(status, error);
+}
+
+pictor_status pictor_session_generate_batch(pictor_session* session, const pictor_request* request,
+    int32_t count, pictor_batch_progress_callback progress, void* userdata,
+    pictor_image** outputs, double* batch_seconds, pictor_error* error) noexcept {
+    return generate_batch(session, request, nullptr, false, count, progress, userdata, outputs, batch_seconds, error);
+}
+pictor_status pictor_flux_klein_session_edit_batch(pictor_session* session, const pictor_request* request,
+    const pictor_flux_klein_edit_options* options, int32_t count,
+    pictor_batch_progress_callback progress, void* userdata,
+    pictor_image** outputs, double* batch_seconds, pictor_error* error) noexcept {
+    return generate_batch(session, request, options, true, count, progress, userdata, outputs, batch_seconds, error);
 }
 
 void pictor_session_destroy(pictor_session* session) noexcept { delete session; }

@@ -23,5 +23,9 @@ Status AnimaSession::create(const SessionOptions& options, std::unique_ptr<Anima
 Status AnimaSession::generate(const GenerationRequest& request, Image& output, ProgressCallback progress, void* userdata) noexcept {
     return impl_->session->generate(request, output, progress, userdata);
 }
+Status AnimaSession::generate_batch(const GenerationRequest& request, int count, BatchResult& output,
+                                      BatchProgressCallback progress, void* userdata) noexcept {
+    return impl_->session->generate_batch(request, count, output, progress, userdata);
+}
 double AnimaSession::load_seconds() const noexcept { return impl_->session->load_seconds(); }
 } // namespace pictor

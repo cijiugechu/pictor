@@ -43,12 +43,13 @@ Status parse(const std::vector<std::string>& args, Options& output) noexcept {
         options.model = Model::flux_klein;
         options.session.model_path = "models/flux2-klein-4b/flux-2-klein-4b-Q4_0.gguf";
         options.text_encoder = "models/flux2-klein-4b/Qwen3-4B-Q4_K_M.gguf";
-        options.vae = "models/flux2-klein-4b/flux2-vae.safetensors";
+        options.vae = "models/flux2-klein-4b/full_encoder_small_decoder.safetensors";
         options.request = flux_klein_request();
     } else if (args[0] != "anima") {
         return failure(ErrorCode::invalid_argument, "expected 'anima' or 'flux-klein' (see --help)");
     }
 
+    bool diffusion_given = false, text_given = false;
     Preset preset = Preset::balanced;
     std::optional<int> steps;
     std::optional<CacheMode> cache;
@@ -57,6 +58,11 @@ Status parse(const std::vector<std::string>& args, Options& output) noexcept {
         if (arg == "--help" || arg == "-h") { options.help = true; output = std::move(options); return {}; }
         if (arg == "--verbose") { options.session.verbose = true; continue; }
         if (arg == "--overwrite") { options.overwrite = true; continue; }
+        if (arg == "--hs-compression") {
+            if (options.model != Model::flux_klein)
+                return failure(ErrorCode::invalid_argument, "--hs-compression requires flux-klein");
+            options.hidden_state_compression = true; continue;
+        }
         if (arg == "--vae-tiling") { options.request.vae_tiling = true; continue; }
         if (arg == "--disable-auto-resize-ref-image") {
             if (options.model != Model::flux_klein) return failure(ErrorCode::invalid_argument, "reference flags require flux-klein");
@@ -65,14 +71,20 @@ Status parse(const std::vector<std::string>& args, Options& output) noexcept {
         if (i + 1 >= args.size()) return failure(ErrorCode::invalid_argument, "missing value for " + arg);
         const auto& value = args[++i];
         Status status;
-        if (arg == "--model") {
+        if (arg == "--backend") {
+            if (options.model != Model::flux_klein) return failure(ErrorCode::invalid_argument, "--backend requires flux-klein");
+            if (value == "auto") options.backend = KleinBackend::automatic;
+            else if (value == "ggml") options.backend = KleinBackend::ggml;
+            else if (value == "mlx") options.backend = KleinBackend::mlx;
+            else return failure(ErrorCode::invalid_argument, "backend must be auto, ggml or mlx");
+        } else if (arg == "--model") {
             if (options.model != Model::anima) return failure(ErrorCode::invalid_argument, "Klein uses --diffusion-model, --text-encoder and --vae");
             options.session.model_path = value;
         } else if (arg == "--diffusion-model" || arg == "--text-encoder" || arg == "--llm" || arg == "--vae") {
             if (options.model != Model::flux_klein) return failure(ErrorCode::invalid_argument, arg + " is only supported by flux-klein");
-            if (arg == "--diffusion-model") options.session.model_path = value;
+            if (arg == "--diffusion-model") { options.session.model_path = value; diffusion_given = true; }
             else if (arg == "--vae") options.vae = value;
-            else options.text_encoder = value;
+            else { options.text_encoder = value; text_given = true; }
         }
         else if (arg == "--ref-image" || arg == "-r") {
             if (options.model != Model::flux_klein || value.empty())
@@ -105,6 +117,26 @@ Status parse(const std::vector<std::string>& args, Options& output) noexcept {
         if (!status) return status;
     }
 
+    if (options.model == Model::flux_klein) {
+        auto selected = options.backend;
+        if (selected == KleinBackend::automatic) {
+            std::error_code ec;
+            if (diffusion_given) selected = std::filesystem::is_directory(options.session.model_path,ec) ? KleinBackend::mlx : KleinBackend::ggml;
+            else if (text_given) selected = std::filesystem::is_directory(options.text_encoder,ec) ? KleinBackend::mlx : KleinBackend::ggml;
+#ifdef PICTOR_DEFAULT_MLX
+            else selected = KleinBackend::mlx;
+#else
+            else selected = KleinBackend::ggml;
+#endif
+        }
+        if (selected == KleinBackend::mlx) {
+            if (!diffusion_given) options.session.model_path = "models/mlx-flux2-klein-4b-4bit/transformer";
+            if (!text_given) options.text_encoder = "models/mlx-flux2-klein-4b-4bit/text_encoder";
+        }
+        options.backend = selected;
+        if (selected == KleinBackend::mlx && options.hidden_state_compression)
+            return failure(ErrorCode::invalid_argument, "--hs-compression requires --backend ggml");
+    }
     const auto defaults = options.model == Model::anima ? preset_request(preset) : flux_klein_request();
     options.request.steps = steps.value_or(defaults.steps);
     options.request.cache = cache.value_or(defaults.cache);
@@ -154,12 +186,13 @@ Usage:
   pictor flux-klein --prompt "a red fox" [options]
 
   --model PATH          Anima AIO (default: models/Anima-P3-Turbo-AIO-Q4_K.gguf)
-  --diffusion-model PATH Klein diffusion GGUF
-  --text-encoder PATH    Klein Qwen3 GGUF (alias: --llm)
-  --vae PATH             Klein Flux2 VAE safetensors
+  --backend MODE        Klein: auto (default), mlx, ggml; Apple Silicon defaults to MLX
+  --diffusion-model PATH Klein diffusion GGUF or MLX safetensors directory
+  --text-encoder PATH    Klein Qwen3 GGUF or MLX directory (alias: --llm)
+  --vae PATH             Klein VAE (default: full_encoder_small_decoder.safetensors)
   --ref-image, -r PATH    Klein reference PNG/JPEG; repeat for up to 4 ordered images
   --disable-auto-resize-ref-image  Keep reference size (multiples of 16 required)
-                        Klein paths default to files under models/flux2-klein-4b/
+                        MLX weights: models/mlx-flux2-klein-4b-4bit/; VAE: models/flux2-klein-4b/
   --prompt, -p TEXT      Required positive prompt
   --negative-prompt TEXT Negative prompt (CFG 1 normally skips unconditional guidance)
   --preset NAME         Anima only: fast: 3/Spectrum; balanced: 8/Spectrum; quality: 16/no cache
@@ -168,11 +201,12 @@ Usage:
   --cfg-scale N          Guidance scale (default: 1)
   --width, -W N          Width in pixels (default: 512)
   --height, -H N         Height (Anima default: 768; Klein default: 512)
+  --hs-compression       Klein ggml experimental hidden-state compression (default off; may cause artifacts)
   --seed N               Nonnegative seed or -1 for random (default)
-  --count N              Generate 1..64 images using one loaded model; seeds increment
+  --count N              Generate 1..64 images in bounded batches; seeds increment
   --output, -o PATH      PNG path (default: output.png); count >1 adds -001, -002, ...
   --vae-tiling           Decode VAE in tiles to reduce peak memory
-  --threads N            CPU threads (default: physical core count)
+  --threads N            ggml CPU threads (MLX manages its own scheduling)
   --overwrite           Allow replacing existing PNG/JSON output files
   --verbose             Print backend logs
   --help, -h            Show help
@@ -182,6 +216,8 @@ Anima: 512x768, er_sde/smoothstep, flash attention.
 Klein 4B distilled: 512x512, 4 steps, CFG 1, Euler/discrete, diffusion flash attention.
 Klein supports text-to-image and reference-image editing; output size stays explicit.
 Dimensions must be multiples of 16, from 64 to 4096; large images may exhaust memory.
+Batches reuse text/reference encodings; at most 8 images / 16 megapixels per batch.
+Images are saved after each batch completes. Timings include the batch average.
 Each PNG has a JSON sidecar with effective settings, seed, and timings.
 Builds and --help do not need weights. Fetch with:
   zig build download-model        (Anima)

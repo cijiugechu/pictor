@@ -74,6 +74,9 @@ const Project = struct {
 pub fn build(b: *std.Build) void {
     const backend = b.option(Backend, "backend", "Inference backend (metal on macOS, cpu elsewhere)") orelse
         (if (builtin.os.tag == .macos) Backend.metal else Backend.cpu);
+    const mlx_enabled = b.option(bool, "mlx", "Build native MLX for Klein (default on Apple Silicon Metal)") orelse
+        (backend == .metal and builtin.os.tag == .macos and builtin.cpu.arch == .aarch64);
+    if (mlx_enabled and (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64)) @panic("MLX requires Apple Silicon");
     const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Project/backend build mode (default ReleaseFast)") orelse .ReleaseFast;
     const jobs = b.option(u32, "jobs", "Upstream compiler parallelism (default 4)") orelse 4;
     if (backend == .metal and builtin.os.tag != .macos) @panic("Metal requires macOS; use -Dbackend=cpu");
@@ -137,6 +140,25 @@ pub fn build(b: *std.Build) void {
     });
     // The upstream C++ backend still throws. Only this small boundary catches it.
     project.cppSources(core.root_module, &.{"src/backend.cpp"}, true);
+    if (mlx_enabled) {
+        const mlx_prepare = b.addSystemCommand(&.{ "bash", b.pathFromRoot("scripts/prepare-mlx.sh") });
+        core.step.dependOn(&mlx_prepare.step);
+        core.root_module.addSystemIncludePath(b.path("build/mlx-native/include"));
+        core.root_module.addIncludePath(b.path("vendor/stable-diffusion.cpp/src"));
+        core.root_module.addIncludePath(b.path("vendor/stable-diffusion.cpp/ggml/include"));
+        core.root_module.addCSourceFiles(.{ .files = &.{ "src/mlx/weights.cpp", "src/mlx/text_encoder.cpp", "src/mlx/transformer.cpp", "src/mlx/vae.cpp", "src/mlx/session.cpp" }, .flags = &.{ "-std=c++20", "-Wall", "-Wextra", "-nostdinc++", "-DSPDLOG_NO_EXCEPTIONS", "-DFMT_EXCEPTIONS=0" } });
+        core.root_module.addCSourceFile(.{ .file = b.path("src/mlx/tokenizer.mm"), .flags = &.{ "-std=c++20", "-fobjc-arc", "-Wall", "-Wextra", "-nostdinc++" } });
+        core.root_module.linkFramework("Foundation", .{});
+        core.root_module.addObjectFile(b.path("build/mlx-native/lib/libmlx.dylib"));
+        for ([_][]const u8{ "libmlx.dylib", "mlx.metallib" }) |file| {
+            const install = b.addInstallFileWithDir(b.path(b.fmt("build/mlx-native/lib/{s}", .{file})), .lib, file);
+            install.step.dependOn(&mlx_prepare.step);
+            b.getInstallStep().dependOn(&install.step);
+        }
+        const license = b.addInstallFile(b.path("build/mlx-native/LICENSE"), "share/pictor/licenses/mlx.txt");
+        license.step.dependOn(&mlx_prepare.step);
+        b.getInstallStep().dependOn(&license.step);
+    } else project.cppSources(core.root_module, &.{"src/mlx_stub.cpp"}, false);
     core.each_lib_rpath = false;
     core.root_module.addObjectFile(backend_file);
     core.root_module.addRPathSpecial(if (sdk != null) "@loader_path" else "$ORIGIN");
@@ -144,10 +166,12 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(core);
 
     const exe = project.executable("pictor", &.{ "src/main.cpp", "src/cli.cpp" });
+    if (mlx_enabled) exe.root_module.addCMacro("PICTOR_DEFAULT_MLX", "1");
     // Explicit shared-object linkage keeps build-cache paths out of installed rpaths.
     exe.root_module.addObjectFile(core.getEmittedBin());
     b.installArtifact(exe);
     b.installDirectory(.{ .source_dir = b.path("include/pictor"), .install_dir = .header, .install_subdir = "pictor" });
+    b.installFile("licenses/mflux.txt", "share/pictor/licenses/mflux.txt");
     b.installFile("THIRD_PARTY_NOTICES.md", "share/pictor/THIRD_PARTY_NOTICES.md");
     const notices = [_][2][]const u8{
         .{ "vendor/stable-diffusion.cpp/LICENSE", "stable-diffusion.cpp.txt" },
@@ -173,6 +197,18 @@ pub fn build(b: *std.Build) void {
     const tests = project.executable("pictor_tests", &.{ "tests/options_test.cpp", "src/options.cpp", "src/cli.cpp" });
     const test_step = b.step("test", "Run C/C++ ABI, backend boundary, option and CLI/logging tests without weights");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+    const mlx_options_test = project.executable("pictor_mlx_options_tests", &.{ "tests/options_test.cpp", "src/options.cpp", "src/cli.cpp" });
+    mlx_options_test.root_module.addCMacro("PICTOR_DEFAULT_MLX", "1");
+    test_step.dependOn(&b.addRunArtifact(mlx_options_test).step);
+    const hs_test = project.executable("pictor_hs_graph_tests", &.{"tests/hs_graph_test.cpp"});
+    hs_test.root_module.addIncludePath(b.path("vendor/stable-diffusion.cpp/src"));
+    hs_test.root_module.addIncludePath(b.path("vendor/stable-diffusion.cpp/ggml/include"));
+    hs_test.root_module.addObjectFile(backend_file);
+    hs_test.step.dependOn(&backend_build.step);
+    const hs_run = project.installedRun(hs_test);
+    if (backend == .metal) hs_run.addArg("--gpu");
+    test_step.dependOn(&hs_run.step);
+
     const c_test = project.cExecutable("pictor_c_tests", "tests/c_api_test.c");
     c_test.root_module.addObjectFile(core.getEmittedBin());
     test_step.dependOn(&project.installedRun(c_test).step);
@@ -188,8 +224,36 @@ pub fn build(b: *std.Build) void {
 
     const session_test = project.executable("pictor_session_tests", &.{ "tests/session_test.cpp", "tests/session_backend.cpp", "src/anima.cpp", "src/flux_klein.cpp", "src/session.cpp", "src/options.cpp", "src/logging.cpp", "src/c_api.cpp", "src/image.cpp", "src/png.cpp" });
     project.cppSources(session_test.root_module, &.{"src/backend.cpp"}, true);
+    project.cppSources(session_test.root_module, &.{"src/mlx_stub.cpp"}, false);
     test_step.dependOn(&b.addRunArtifact(session_test).step);
 
+    const batch_cli = project.executable("pictor_batch_cli_tests", &.{ "src/main.cpp", "src/cli.cpp", "tests/session_backend.cpp", "src/anima.cpp", "src/flux_klein.cpp", "src/session.cpp", "src/options.cpp", "src/logging.cpp", "src/image.cpp", "src/png.cpp" });
+    project.cppSources(batch_cli.root_module, &.{"src/backend.cpp"}, true);
+    project.cppSources(batch_cli.root_module, &.{"src/mlx_stub.cpp"}, false);
+    const batch_cli_test = b.addSystemCommand(&.{ "bash", b.pathFromRoot("tests/cli_batch.sh") });
+    batch_cli_test.addArtifactArg(batch_cli);
+    test_step.dependOn(&batch_cli_test.step);
+
+    if (mlx_enabled) {
+        const mlx_smoke_exe = project.executable("pictor_mlx_smoke", &.{"tests/mlx_smoke.cpp"});
+        mlx_smoke_exe.root_module.addObjectFile(core.getEmittedBin());
+        b.step("smoke-mlx", "Native MLX C/C++/batch/edit parity with pinned local weights").dependOn(&project.installedRun(mlx_smoke_exe).step);
+        const probe = b.addExecutable(.{ .name = "pictor_mlx_probe", .root_module = project.cpp(&.{}, true) });
+        probe.root_module.addCSourceFiles(.{ .files = &.{ "tests/mlx_probe.cpp", "src/mlx/weights.cpp", "src/mlx/text_encoder.cpp", "src/mlx/transformer.cpp", "src/mlx/vae.cpp" }, .flags = &.{ "-std=c++20", "-nostdinc++" } });
+        probe.root_module.addCSourceFile(.{ .file = b.path("src/mlx/tokenizer.mm"), .flags = &.{ "-std=c++20", "-fobjc-arc", "-nostdinc++" } });
+        // MLX headers require C++20, including the numerical probe itself.
+        probe.root_module.addSystemIncludePath(b.path("build/mlx-native/include"));
+        probe.root_module.addIncludePath(b.path("vendor/stable-diffusion.cpp/src"));
+        probe.root_module.addObjectFile(b.path("build/mlx-native/lib/libmlx.dylib"));
+        probe.root_module.addObjectFile(backend_file);
+        probe.root_module.linkFramework("Foundation", .{});
+        probe.root_module.addRPathSpecial("@loader_path/../lib");
+        probe.each_lib_rpath = false;
+        probe.step.dependOn(&core.step);
+        const probe_install = b.addInstallArtifact(probe, .{});
+        probe_install.step.dependOn(b.getInstallStep());
+        b.step("mlx-probe-build", "Build the model-dependent component parity probe").dependOn(&probe_install.step);
+    }
     const klein_smoke_exe = project.executable("pictor_klein_smoke", &.{"tests/klein_smoke.cpp"});
     klein_smoke_exe.root_module.addObjectFile(core.getEmittedBin());
     const klein_smoke = project.installedRun(klein_smoke_exe);
@@ -200,6 +264,27 @@ pub fn build(b: *std.Build) void {
     const edit_smoke = project.installedRun(edit_smoke_exe);
     if (b.args) |args| edit_smoke.addArgs(args);
     b.step("smoke-klein-edit", "Klein reference edit checks (model dir, reference PNG/JPEG, output dir after --)").dependOn(&edit_smoke.step);
+
+    const batch_smoke_exe = project.executable("pictor_batch_smoke", &.{"tests/batch_smoke.cpp"});
+    batch_smoke_exe.root_module.addObjectFile(core.getEmittedBin());
+    const batch_smoke = project.installedRun(batch_smoke_exe);
+    if (b.args) |args| batch_smoke.addArgs(args);
+    b.step("smoke-batch", "Compare native batches with individual inference (--anima/--klein and model path)").dependOn(&batch_smoke.step);
+
+    const hs_smoke_exe = project.executable("pictor_hs_smoke", &.{"tests/hs_smoke.cpp"});
+    hs_smoke_exe.root_module.addObjectFile(core.getEmittedBin());
+    const hs_smoke = project.installedRun(hs_smoke_exe);
+    if (b.args) |args| hs_smoke.addArgs(args);
+    b.step("smoke-hs", "Klein HS exact-off, geometry, batch parity and 512px A/B (model/output dirs)").dependOn(&hs_smoke.step);
+
+    const bench_exe = project.executable("pictor_klein_bench", &.{ "benchmarks/klein.cpp", "src/cli.cpp" });
+    bench_exe.root_module.addIncludePath(b.path("vendor/stable-diffusion.cpp/src"));
+    bench_exe.root_module.addIncludePath(b.path("vendor/stable-diffusion.cpp/ggml/include"));
+    bench_exe.root_module.addObjectFile(backend_file);
+    bench_exe.root_module.addObjectFile(core.getEmittedBin());
+    const bench_install = b.addInstallArtifact(bench_exe, .{});
+    bench_install.step.dependOn(b.getInstallStep());
+    b.step("benchmark-build", "Build resident Klein benchmark without running inference").dependOn(&bench_install.step);
 
     const c_smoke = project.cExecutable("pictor_c_smoke", "tests/c_api_smoke.c");
     c_smoke.root_module.addObjectFile(core.getEmittedBin());
@@ -218,6 +303,11 @@ pub fn build(b: *std.Build) void {
     const zig_klein_test = project.installedRun(zig_example);
     zig_klein_test.addArg("--klein");
     ffi_test.dependOn(&zig_klein_test.step);
+    if (mlx_enabled) {
+        const run_mlx = project.installedRun(zig_example);
+        run_mlx.addArg("--mlx");
+        ffi_test.dependOn(&run_mlx.step);
+    }
     const rust = b.addSystemCommand(&.{ "rustc", "--edition=2024" });
     rust.addFileArg(b.path("examples/anima.rs"));
     rust.addArgs(&.{ b.fmt("-Lnative={s}", .{b.getInstallPath(.lib, "")}), b.fmt("-Clink-arg=-Wl,-rpath,{s}", .{if (sdk != null) "@loader_path/../lib" else "$ORIGIN/../lib"}), "-o" });
@@ -233,6 +323,12 @@ pub fn build(b: *std.Build) void {
     rust_klein_run.step.dependOn(&install_rust.step);
     rust_klein_run.addFileInput(rust_bin);
     ffi_test.dependOn(&rust_klein_run.step);
+    if (mlx_enabled) {
+        const run_mlx = b.addSystemCommand(&.{ b.getInstallPath(.bin, "pictor_rust_example"), "--mlx" });
+        run_mlx.step.dependOn(&install_rust.step);
+        run_mlx.addFileInput(rust_bin);
+        ffi_test.dependOn(&run_mlx.step);
+    }
     const help = b.addSystemCommand(&.{ b.getInstallPath(.bin, "pictor"), "--help" });
     help.step.dependOn(b.getInstallStep());
     help.addFileInput(exe.getEmittedBin());
@@ -298,8 +394,8 @@ pub fn build(b: *std.Build) void {
     install_reference.step.dependOn(&install_backend.step);
     b.step("reference", "Build/install the pinned upstream CLI without the server").dependOn(&install_reference.step);
 
-    const klein_download = b.addSystemCommand(&.{ "bash", b.pathFromRoot("scripts/download-klein-model.sh") });
-    b.step("download-klein-model", "Download/verify Klein 4B Q4, Qwen3 4B Q4 and VAE (5.3 GB)").dependOn(&klein_download.step);
+    const klein_download = b.addSystemCommand(&.{ "bash", b.pathFromRoot(if (mlx_enabled) "scripts/download-mlx-model.sh" else "scripts/download-klein-model.sh") });
+    b.step("download-klein-model", "Download/verify default Klein backend weights and Small Decoder").dependOn(&klein_download.step);
 
     const download = b.addSystemCommand(&.{ "bash", b.pathFromRoot("scripts/download-model.sh") });
     b.step("download-model", "Download and verify Anima P3 Turbo AIO Q4 (1.79 GB)").dependOn(&download.step);

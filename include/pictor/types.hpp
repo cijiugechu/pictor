@@ -33,6 +33,16 @@ struct Progress {
 // Synchronous callback on the generating thread; must not re-enter pictor.
 using ProgressCallback = void (*)(const Progress&, void* userdata) noexcept;
 
+// A batch has at most 8 images and 16 megapixels of total output.
+inline constexpr int max_batch_count = 8;
+inline constexpr std::size_t max_batch_pixels = 16 * 1024 * 1024;
+struct BatchProgress {
+    int image_index; // Zero-based sampling index; decoding follows all sampling.
+    int image_count;
+    Progress sampling;
+};
+using BatchProgressCallback = void (*)(const BatchProgress&, void* userdata) noexcept;
+
 struct Image {
     int width = 0;
     int height = 0;
@@ -41,6 +51,14 @@ struct Image {
     std::int64_t seed = 0;
     double generation_seconds = 0;
 };
+
+// Batch images report amortized time (whole batch / count), not individual latency.
+// Results arrive together after all images are decoded. Empty on failure.
+struct BatchResult {
+    std::vector<Image> images;
+    double generation_seconds = 0;
+};
+[[nodiscard]] Status validate_batch_request(const GenerationRequest& request, int count) noexcept;
 
 // Borrowed, tightly packed RGB8; bytes remain valid for the complete edit call.
 struct ImageView {

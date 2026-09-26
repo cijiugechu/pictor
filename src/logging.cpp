@@ -21,4 +21,8 @@ spdlog::logger& backend() {
     static auto logger = make_logger("sd.cpp", spdlog::level::debug);
     return *logger;
 }
+spdlog::logger& mlx() {
+    static auto logger = make_logger("mlx", spdlog::level::info);
+    return *logger;
+}
 } // namespace pictor::logging
