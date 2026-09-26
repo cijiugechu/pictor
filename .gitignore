@@ -5,3 +5,9 @@
 /outputs/
 .DS_Store
 __pycache__/
+
+# Local agent notes and handoff files
+/findings.md
+/progress.md
+/task_plan.md
+/HANDOFF.md
