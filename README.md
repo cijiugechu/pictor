@@ -320,12 +320,12 @@ For Small Decoder, resident timing, Metal System Trace and MLX comparison experi
 see [the reproducible benchmark guide](docs/benchmarking.md).
 
 Anima's native MLX backend supports public xocialize weights or locally
-dequantized P3 Turbo weights. Conversion, stage parity and resident
-comparison commands are in [the Anima MLX experiment guide](docs/anima-mlx-experiments.md).
-On the tested M4/32 GiB host, P3 BF16 MLX reduced 512x768 resident generation from
-51.47s to 25.14s at three steps; the public model remains a slower detail/style option.
-The measured P3 BF16 route is now integrated into the public API and is the
-Apple Silicon CLI default; experiment targets remain for numerical comparisons.
+dequantized P3 Turbo weights. On the tested M4/32 GiB host, P3 BF16 MLX
+reduced 512x768 resident generation from 51.47s to 25.14s at three steps;
+the public model remains a slower detail/style option. The measured P3 BF16
+route is now integrated into the public API and is the Apple Silicon CLI
+default; the `anima-mlx-build` and `anima-ggml-probe-build` steps keep
+experimental executables for numerical comparisons.
 
 ### Optional Klein hidden-state compression
 
@@ -377,18 +377,23 @@ zig-out/bin/sd-cli \
 
 Compare decoded pixels rather than PNG bytes (the upstream CLI embeds metadata).
 Same-seed identity is tested for this backend/build/device; it is not a guarantee
-across versions or different GPU backends. See `docs/validation.md` for measured results.
+across versions or different GPU backends.
 
 ## Dependency maintenance
 
 - sd.cpp: `90e87bc846f17059771efb8aaa31e9ef0cab6f78`
 - ggml: `404fcb9d7c96989569e68c9e7881ee3465a05c50`
-- Local patch: `patches/anima-ggml-metal-im2col3d-pad.patch`
-- Callback output patch: `patches/sd-model-progress-callback.patch` (suppresses
-  split-file loader separator newlines when a progress callback is installed)
+- Local ggml patch: `patches/anima-ggml-metal-im2col3d-pad.patch`
+- sd.cpp patches: `patches/sd-model-progress-callback.patch` (suppresses
+  split-file loader separator newlines when a progress callback is installed),
+  `patches/sd-sampling-image-index.patch` (thread-local sampling index so batch
+  progress can exclude VAE tiling events) and
+  `patches/sd-flux-hidden-state-compression.patch` (opt-in Klein hidden-state
+  compression, disabled by default)
 - spdlog 1.17.0: `79524ddd08a4ec981b7fea76afd08ee05f83755d`
 
-Preparation checks all three dependency revisions and whether both patches are already applied.
+Preparation checks all three dependency revisions and whether all four patches
+are already applied.
 Mismatches fail explicitly; it does not reset modified checkouts. A modified ggml
 and sd.cpp submodule after building is expected because patches are kept separately.
 When upgrading, update the pins, check patch compatibility and API ownership,

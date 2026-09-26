@@ -1,7 +1,5 @@
 # Reproducible Klein performance experiments
 
-Measured observations are recorded in [the experiment report](benchmark-results-2026-09-26.md).
-
 These are developer experiments, separate from production presets. Keep HS off.
 Run only one inference process at a time. Use AC power and a stable system state;
 record thermal conditions and avoid concurrent builds/downloads. This host is a

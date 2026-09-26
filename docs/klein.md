@@ -246,7 +246,6 @@ matching dimensions, prompt and seed. Compare decoded RGB pixels. Different
 quantization formats/frameworks are not expected to agree pixel-for-pixel.
 For reference editing, add `-r source.png` (repeat for multiple references). Match
 `--disable-auto-resize-ref-image` when native reference sizing is selected.
-See [measured results and validation boundaries](validation.md).
 
 ## Batches
 

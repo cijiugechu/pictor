@@ -134,5 +134,4 @@ build/mlx-venv/bin/python scripts/check-mlx-parity.py
 The 64px stage fixture compares token IDs, all text embeddings, transformer
 predictions, and original/Small VAE encode/decode tensors. Full 512px/4-step generation with the
 original MLX VAE is also pixel-identical to the previously validated aligned
-MFLUX image. See the native integration section in the dated benchmark results
-for measured runs and their limits.
+MFLUX image.

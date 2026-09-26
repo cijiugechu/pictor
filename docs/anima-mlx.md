@@ -143,8 +143,7 @@ Real Anima checks cover C/C++ exact RGB, batch/single and concurrent-call
 equivalence, seed progression, callbacks, CFG0/CFG2, negative/Unicode prompts,
 tiled edge sizes, malformed weights/input, recovery and image lifetime. The
 production 512×768 default and explicit ggml route are also compared with retained
-pre-integration images. See [the experiment report](anima-mlx-experiments.md) for
-timing/quality evidence; integration smoke times are not new controlled benchmarks.
+pre-integration images. Integration smoke times are not new controlled benchmarks.
 
 Deployment uses the existing native MLX library/metallib layout described in
 [the MLX packaging guide](mlx.md#build-and-install). Inference has no Python
