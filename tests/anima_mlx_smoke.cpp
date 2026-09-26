@@ -7,6 +7,7 @@
 #include <limits>
 #include <thread>
 #include <unistd.h>
+#include <spdlog/fmt/fmt.h>
 using namespace pictor;
 static void require(bool ok, const char *message) {
     if (!ok) {
@@ -18,7 +19,7 @@ static void check(Status s) { require(s.ok(), s.message); }
 static void check_c(pictor_status s, const pictor_error &e) { require(s == PICTOR_OK, e.message); }
 int main() {
     std::unique_ptr<AnimaSession> session;
-    const auto broken = std::filesystem::temp_directory_path() / ("pictor-anima-broken-" + std::to_string(getpid()));
+    const auto broken = std::filesystem::temp_directory_path() / fmt::format("pictor-anima-broken-{}", getpid());
     require(std::filesystem::create_directory(broken), "create isolated corrupt weights fixture");
     for (const auto *name : {"transformer-bf16.safetensors", "text_encoder-bf16.safetensors",
                              "llm_adapter-bf16.safetensors", "vae-bf16.safetensors"})

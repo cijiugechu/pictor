@@ -4,10 +4,10 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdlib>
-#include <iomanip>
+#include <iterator>
 #include <limits>
 #include <optional>
-#include <sstream>
+#include <spdlog/fmt/fmt.h>
 
 namespace pictor::cli {
 namespace {
@@ -15,7 +15,7 @@ template<typename T>
 Status integer(const std::string& text, const std::string& option, T& value) noexcept {
     const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
     if (result.ec != std::errc{} || result.ptr != text.data() + text.size())
-        return failure(ErrorCode::invalid_argument, option + " requires an integer in range");
+        return failure(ErrorCode::invalid_argument, fmt::format("{} requires an integer in range", option));
     return {};
 }
 
@@ -24,7 +24,7 @@ Status real(const std::string& text, const std::string& option, float& value) no
     errno = 0;
     value = std::strtof(text.c_str(), &end);
     if (errno == ERANGE || end == text.c_str() || end != text.c_str() + text.size() || !std::isfinite(value))
-        return failure(ErrorCode::invalid_argument, option + " requires a finite number");
+        return failure(ErrorCode::invalid_argument, fmt::format("{} requires a finite number", option));
     return {};
 }
 } // namespace
@@ -68,7 +68,7 @@ Status parse(const std::vector<std::string>& args, Options& output) noexcept {
             if (options.model != Model::flux_klein) return failure(ErrorCode::invalid_argument, "reference flags require flux-klein");
             options.auto_resize_reference = false; continue;
         }
-        if (i + 1 >= args.size()) return failure(ErrorCode::invalid_argument, "missing value for " + arg);
+        if (i + 1 >= args.size()) return failure(ErrorCode::invalid_argument, fmt::format("missing value for {}", arg));
         const auto& value = args[++i];
         Status status;
         if (arg == "--backend") {
@@ -81,7 +81,7 @@ Status parse(const std::vector<std::string>& args, Options& output) noexcept {
             options.session.model_path = value;
             anima_model_given = true;
         } else if (arg == "--diffusion-model" || arg == "--text-encoder" || arg == "--llm" || arg == "--vae") {
-            if (options.model != Model::flux_klein) return failure(ErrorCode::invalid_argument, arg + " is only supported by flux-klein");
+            if (options.model != Model::flux_klein) return failure(ErrorCode::invalid_argument, fmt::format("{} is only supported by flux-klein", arg));
             if (arg == "--diffusion-model") { options.session.model_path = value; diffusion_given = true; }
             else if (arg == "--vae") options.vae = value;
             else { options.text_encoder = value; text_given = true; }
@@ -113,7 +113,7 @@ Status parse(const std::vector<std::string>& args, Options& output) noexcept {
             if (value == "none") cache = CacheMode::none;
             else if (value == "spectrum") cache = CacheMode::spectrum;
             else return failure(ErrorCode::invalid_argument, "cache must be none or spectrum");
-        } else return failure(ErrorCode::invalid_argument, "unknown argument: " + arg);
+        } else return failure(ErrorCode::invalid_argument, fmt::format("unknown argument: {}", arg));
         if (!status) return status;
     }
 
@@ -177,22 +177,20 @@ Status output_path(const Options& options, int index, std::filesystem::path& out
     output.clear();
     if (index < 0 || index >= options.count) return failure(ErrorCode::invalid_argument, "image index out of range");
     if (options.count == 1) { output = options.output; return {}; }
-    std::ostringstream name;
-    name << options.output.stem().string() << '-' << std::setfill('0') << std::setw(3) << index + 1 << ".png";
-    output = options.output.parent_path() / name.str();
+    output = options.output.parent_path() / fmt::format("{}-{:03d}.png", options.output.stem().string(), index + 1);
     return {};
 }
 
 std::string json_string(std::string_view value) {
-    std::ostringstream out;
-    out << '"';
+    fmt::memory_buffer out;
+    out.push_back('"');
     for (unsigned char c : value) {
-        if (c == '"' || c == '\\') out << '\\' << c;
-        else if (c < 0x20) out << "\\u" << std::hex << std::setw(4) << std::setfill('0') << static_cast<int>(c);
-        else out << c;
+        if (c == '"' || c == '\\') fmt::format_to(std::back_inserter(out), "\\{}", static_cast<char>(c));
+        else if (c < 0x20) fmt::format_to(std::back_inserter(out), "\\u{:04x}", c);
+        else out.push_back(static_cast<char>(c));
     }
-    out << '"';
-    return out.str();
+    out.push_back('"');
+    return fmt::to_string(out);
 }
 
 const char* usage() {

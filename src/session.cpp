@@ -9,6 +9,7 @@
 #include <new>
 #include <mutex>
 #include <string_view>
+#include <spdlog/fmt/fmt.h>
 
 namespace pictor::detail {
 namespace {
@@ -79,12 +80,12 @@ Session::~Session() {
 
 namespace {
 Status check_file(const std::filesystem::path& path, const char* label) noexcept {
-    if (path.empty()) return failure(ErrorCode::invalid_argument, std::string(label) + " path must not be empty");
+    if (path.empty()) return failure(ErrorCode::invalid_argument, fmt::format("{} path must not be empty", label));
     std::error_code ec;
     const bool regular = std::filesystem::is_regular_file(path, ec);
     if (ec && ec != std::errc::no_such_file_or_directory)
-        return failure(ErrorCode::io_error, std::string("cannot inspect ") + label + ": " + ec.message());
-    if (!regular) return failure(ErrorCode::invalid_argument, std::string(label) + " file not found: " + path.string());
+        return failure(ErrorCode::io_error, fmt::format("cannot inspect {}: {}", label, ec.message()));
+    if (!regular) return failure(ErrorCode::invalid_argument, fmt::format("{} file not found: {}", label, path.string()));
     return {};
 }
 }

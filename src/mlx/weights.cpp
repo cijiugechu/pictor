@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <spdlog/fmt/fmt.h>
 
 namespace pictor::mlx_backend {
 Weights load_weights(const std::filesystem::path &path) {
@@ -13,7 +14,7 @@ Weights load_weights(const std::filesystem::path &path) {
     } else
         files.push_back(path);
     if (files.empty())
-        throw std::invalid_argument("no safetensors in " + path.string());
+        throw std::invalid_argument(fmt::format("no safetensors in {}", path.string()));
     std::sort(files.begin(), files.end());
     Weights out;
     for (const auto &file : files) {
@@ -22,7 +23,7 @@ Weights load_weights(const std::filesystem::path &path) {
             if (value.dtype() == mx::float16 || value.dtype() == mx::float32)
                 value = mx::astype(value, mx::bfloat16);
             if (!out.emplace(name, std::move(value)).second)
-                throw std::invalid_argument("duplicate tensor: " + name);
+                throw std::invalid_argument(fmt::format("duplicate tensor: {}", name));
         }
     }
     std::vector<array> values;
@@ -32,13 +33,13 @@ Weights load_weights(const std::filesystem::path &path) {
     return out;
 }
 array linear(const Weights &w, const std::string &n, const array &x) {
-    if (!w.count(n + ".scales") && w.count(n + ".bias"))
-        return mx::addmm(w.at(n + ".bias"), x, mx::transpose(w.at(n + ".weight")));
-    auto y = w.count(n + ".scales")
-                 ? mx::quantized_matmul(x, w.at(n + ".weight"), w.at(n + ".scales"), w.at(n + ".biases"), true, 64, 4)
-                 : mx::matmul(x, mx::transpose(w.at(n + ".weight")));
-    if (w.count(n + ".bias"))
-        y = y + w.at(n + ".bias");
+    if (!w.count(fmt::format("{}.scales", n)) && w.count(fmt::format("{}.bias", n)))
+        return mx::addmm(w.at(fmt::format("{}.bias", n)), x, mx::transpose(w.at(fmt::format("{}.weight", n))));
+    auto y = w.count(fmt::format("{}.scales", n))
+                 ? mx::quantized_matmul(x, w.at(fmt::format("{}.weight", n)), w.at(fmt::format("{}.scales", n)), w.at(fmt::format("{}.biases", n)), true, 64, 4)
+                 : mx::matmul(x, mx::transpose(w.at(fmt::format("{}.weight", n))));
+    if (w.count(fmt::format("{}.bias", n)))
+        y = y + w.at(fmt::format("{}.bias", n));
     return y;
 }
 array silu(const array &x) {
@@ -62,9 +63,9 @@ array rms(const Weights &w, const std::string &n, const array &x, float eps, boo
     const auto f = mx::astype(x, mx::float32);
     if (qwen) {
         const auto normed = f * mx::rsqrt(mx::mean(mx::square(f), -1, true) + eps);
-        return mx::astype(mx::astype(w.at(n + ".weight"), mx::float32) * normed, x.dtype());
+        return mx::astype(mx::astype(w.at(fmt::format("{}.weight", n)), mx::float32) * normed, x.dtype());
     }
-    return mx::astype(mx::fast::rms_norm(f, w.at(n + ".weight"), eps), x.dtype());
+    return mx::astype(mx::fast::rms_norm(f, w.at(fmt::format("{}.weight", n)), eps), x.dtype());
 }
 array heads(const array &x, int count) {
     return mx::transpose(mx::reshape(x, {1, x.shape(1), count, x.shape(2) / count}), {0, 2, 1, 3});

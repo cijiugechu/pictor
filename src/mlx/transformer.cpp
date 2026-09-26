@@ -2,6 +2,7 @@
 #include "transformer.hpp"
 #include <cmath>
 #include <stdexcept>
+#include <spdlog/fmt/fmt.h>
 
 namespace pictor::mlx_backend {
 namespace {
@@ -27,10 +28,10 @@ array swiglu(const array &x) {
     return silu(p[0]) * p[1];
 }
 array feedforward(const Weights &w, const std::string &n, const array &x) {
-    return linear(w, n + ".linear_out", swiglu(linear(w, n + ".linear_in", x)));
+    return linear(w, fmt::format("{}.linear_out", n), swiglu(linear(w, fmt::format("{}.linear_in", n), x)));
 }
 std::vector<array> modulation(const Weights &w, const std::string &n, const array &t, int count) {
-    return mx::split(mx::expand_dims(linear(w, n + ".linear", silu(t)), 1), count, -1);
+    return mx::split(mx::expand_dims(linear(w, fmt::format("{}.linear", n), silu(t)), 1), count, -1);
 }
 array modulate(const array &x, const std::vector<array> &m, int offset) {
     return (array(1.0f, m[offset + 1].dtype()) + m[offset + 1]) * layer_norm(x) + m[offset];
@@ -65,33 +66,33 @@ array Transformer::forward(const array &image, const array &text, const array &t
     const auto im = modulation(w, "double_stream_modulation_img", temb, 6);
     const auto tm = modulation(w, "double_stream_modulation_txt", temb, 6);
     for (int i = 0; i < 5; ++i) {
-        const std::string base = "transformer_blocks." + std::to_string(i), a = base + ".attn";
+        const std::string base = fmt::format("transformer_blocks.{}", i), a = fmt::format("{}.attn", base);
         const auto nx = modulate(x, im, 0), nc = modulate(txt, tm, 0);
-        auto q = rms(w, a + ".norm_q", heads(linear(w, a + ".to_q", nx), 24), 1e-5f);
-        auto k = rms(w, a + ".norm_k", heads(linear(w, a + ".to_k", nx), 24), 1e-5f);
-        auto v = heads(linear(w, a + ".to_v", nx), 24);
-        const auto tq = rms(w, a + ".norm_added_q", heads(linear(w, a + ".add_q_proj", nc), 24), 1e-5f);
-        const auto tk = rms(w, a + ".norm_added_k", heads(linear(w, a + ".add_k_proj", nc), 24), 1e-5f);
-        const auto tv = heads(linear(w, a + ".add_v_proj", nc), 24);
+        auto q = rms(w, fmt::format("{}.norm_q", a), heads(linear(w, fmt::format("{}.to_q", a), nx), 24), 1e-5f);
+        auto k = rms(w, fmt::format("{}.norm_k", a), heads(linear(w, fmt::format("{}.to_k", a), nx), 24), 1e-5f);
+        auto v = heads(linear(w, fmt::format("{}.to_v", a), nx), 24);
+        const auto tq = rms(w, fmt::format("{}.norm_added_q", a), heads(linear(w, fmt::format("{}.add_q_proj", a), nc), 24), 1e-5f);
+        const auto tk = rms(w, fmt::format("{}.norm_added_k", a), heads(linear(w, fmt::format("{}.add_k_proj", a), nc), 24), 1e-5f);
+        const auto tv = heads(linear(w, fmt::format("{}.add_v_proj", a), nc), 24);
         q = rotate(mx::concatenate({tq, q}, 2), pos);
         k = rotate(mx::concatenate({tk, k}, 2), pos);
         const auto out = attention(q, k, mx::concatenate({tv, v}, 2));
-        x = x + im[2] * linear(w, a + ".to_out", part(out, 1, nt, out.shape(1)));
-        txt = txt + tm[2] * linear(w, a + ".to_add_out", part(out, 1, 0, nt));
-        x = x + im[5] * feedforward(w, base + ".ff", modulate(x, im, 3));
-        txt = txt + tm[5] * feedforward(w, base + ".ff_context", modulate(txt, tm, 3));
+        x = x + im[2] * linear(w, fmt::format("{}.to_out", a), part(out, 1, nt, out.shape(1)));
+        txt = txt + tm[2] * linear(w, fmt::format("{}.to_add_out", a), part(out, 1, 0, nt));
+        x = x + im[5] * feedforward(w, fmt::format("{}.ff", base), modulate(x, im, 3));
+        txt = txt + tm[5] * feedforward(w, fmt::format("{}.ff_context", base), modulate(txt, tm, 3));
     }
     x = mx::concatenate({txt, x}, 1);
     const auto sm = modulation(w, "single_stream_modulation", temb, 3);
     for (int i = 0; i < 20; ++i) {
-        const std::string a = "single_transformer_blocks." + std::to_string(i) + ".attn";
-        const auto proj = linear(w, a + ".to_qkv_mlp_proj", modulate(x, sm, 0));
-        auto q = rms(w, a + ".norm_q", heads(part(proj, -1, 0, 3072), 24), 1e-5f);
-        auto k = rms(w, a + ".norm_k", heads(part(proj, -1, 3072, 6144), 24), 1e-5f);
+        const std::string a = fmt::format("single_transformer_blocks.{}.attn", i);
+        const auto proj = linear(w, fmt::format("{}.to_qkv_mlp_proj", a), modulate(x, sm, 0));
+        auto q = rms(w, fmt::format("{}.norm_q", a), heads(part(proj, -1, 0, 3072), 24), 1e-5f);
+        auto k = rms(w, fmt::format("{}.norm_k", a), heads(part(proj, -1, 3072, 6144), 24), 1e-5f);
         const auto v = heads(part(proj, -1, 6144, 9216), 24);
         const auto out = attention(rotate(q, pos), rotate(k, pos), v);
         const auto mlp = swiglu(part(proj, -1, 9216, proj.shape(-1)));
-        x = x + sm[2] * linear(w, a + ".to_out", mx::concatenate({out, mlp}, -1));
+        x = x + sm[2] * linear(w, fmt::format("{}.to_out", a), mx::concatenate({out, mlp}, -1));
     }
     x = part(x, 1, nt, x.shape(1));
     const auto mods = mx::split(linear(w, "norm_out.linear", silu(temb)), 2, -1);

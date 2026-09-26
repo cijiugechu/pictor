@@ -2,6 +2,7 @@
 #include "text_encoder.hpp"
 #include <limits>
 #include <stdexcept>
+#include <spdlog/fmt/fmt.h>
 
 namespace pictor::mlx_backend {
 TextEncoder::TextEncoder(const std::filesystem::path &path) : weights_(load_weights(path)) {
@@ -10,14 +11,14 @@ TextEncoder::TextEncoder(const std::filesystem::path &path) : weights_(load_weig
 }
 std::vector<int> TextEncoder::tokens(const std::string &prompt) {
     auto result =
-        tokenizer_.encode("<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
+        tokenizer_.encode(fmt::format("<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n", prompt));
     result.resize(512, 151643);
     return result;
 }
 array TextEncoder::encode(const std::string &prompt) {
     const auto &w = weights_;
     auto ids =
-        tokenizer_.encode("<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
+        tokenizer_.encode(fmt::format("<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n", prompt));
     const int length = std::min(int(ids.size()), 512);
     ids.resize(512, 151643);
     const array index(ids.data(), {512}, mx::int32);
@@ -42,20 +43,20 @@ array TextEncoder::encode(const std::string &prompt) {
     std::vector<array> states;
     // Only hidden layers 9/18/27 are consumed; later layers are unused by Klein.
     for (int i = 0; i < 27; ++i) {
-        const std::string b = "layers." + std::to_string(i), a = b + ".self_attn";
-        const auto n = rms(w, b + ".input_layernorm", x, 1e-6f, true);
-        auto q = mx::reshape(linear(w, a + ".q_proj", n), {1, 512, 32, 128});
-        auto k = mx::reshape(linear(w, a + ".k_proj", n), {1, 512, 8, 128});
-        q = rotate(mx::transpose(rms(w, a + ".q_norm", q, 1e-6f, true), {0, 2, 1, 3}));
-        k = rotate(mx::transpose(rms(w, a + ".k_norm", k, 1e-6f, true), {0, 2, 1, 3}));
-        const auto v = heads(linear(w, a + ".v_proj", n), 8);
+        const std::string b = fmt::format("layers.{}", i), a = fmt::format("{}.self_attn", b);
+        const auto n = rms(w, fmt::format("{}.input_layernorm", b), x, 1e-6f, true);
+        auto q = mx::reshape(linear(w, fmt::format("{}.q_proj", a), n), {1, 512, 32, 128});
+        auto k = mx::reshape(linear(w, fmt::format("{}.k_proj", a), n), {1, 512, 8, 128});
+        q = rotate(mx::transpose(rms(w, fmt::format("{}.q_norm", a), q, 1e-6f, true), {0, 2, 1, 3}));
+        k = rotate(mx::transpose(rms(w, fmt::format("{}.k_norm", a), k, 1e-6f, true), {0, 2, 1, 3}));
+        const auto v = heads(linear(w, fmt::format("{}.v_proj", a), n), 8);
         const auto out = mx::astype(attention(mx::astype(q, mx::float32), mx::astype(mx::repeat(k, 4, 1), mx::float32),
                                               mx::astype(mx::repeat(v, 4, 1), mx::float32), mask),
                                     mx::bfloat16);
-        x = x + linear(w, a + ".o_proj", out);
-        const auto post = rms(w, b + ".post_attention_layernorm", x, 1e-6f, true);
-        x = x + linear(w, b + ".mlp.down_proj",
-                       silu(linear(w, b + ".mlp.gate_proj", post)) * linear(w, b + ".mlp.up_proj", post));
+        x = x + linear(w, fmt::format("{}.o_proj", a), out);
+        const auto post = rms(w, fmt::format("{}.post_attention_layernorm", b), x, 1e-6f, true);
+        x = x + linear(w, fmt::format("{}.mlp.down_proj", b),
+                       silu(linear(w, fmt::format("{}.mlp.gate_proj", b), post)) * linear(w, fmt::format("{}.mlp.up_proj", b), post));
         if (i == 8 || i == 17 || i == 26)
             states.push_back(x);
     }

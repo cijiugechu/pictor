@@ -3,65 +3,63 @@
 
 #include <algorithm>
 #include <fstream>
-#include <iomanip>
 #include <iostream>
+#include <spdlog/fmt/fmt.h>
 
 namespace {
 pictor::Status write_metadata(const std::filesystem::path& path, const pictor::cli::Options& options,
                     const pictor::Image& image, double load_seconds, int batch_count, double batch_seconds) noexcept {
     std::error_code ec;
     const auto model = std::filesystem::absolute(options.session.model_path, ec);
-    if (ec) return pictor::failure(pictor::ErrorCode::io_error, "cannot resolve model path: " + ec.message());
+    if (ec) return pictor::failure(pictor::ErrorCode::io_error, fmt::format("cannot resolve model path: {}", ec.message()));
     const bool klein = options.model == pictor::cli::Model::flux_klein;
     std::filesystem::path text_encoder, vae;
     if (klein) {
         text_encoder = std::filesystem::absolute(options.text_encoder, ec);
-        if (ec) return pictor::failure(pictor::ErrorCode::io_error, "cannot resolve text encoder path: " + ec.message());
+        if (ec) return pictor::failure(pictor::ErrorCode::io_error, fmt::format("cannot resolve text encoder path: {}", ec.message()));
         vae = std::filesystem::absolute(options.vae, ec);
-        if (ec) return pictor::failure(pictor::ErrorCode::io_error, "cannot resolve VAE path: " + ec.message());
+        if (ec) return pictor::failure(pictor::ErrorCode::io_error, fmt::format("cannot resolve VAE path: {}", ec.message()));
     }
     std::ofstream out(path);
-    if (!out) return pictor::failure(pictor::ErrorCode::io_error, "cannot write metadata: " + path.string());
+    if (!out) return pictor::failure(pictor::ErrorCode::io_error, fmt::format("cannot write metadata: {}", path.string()));
     const auto& request = options.request;
     const auto quote = pictor::cli::json_string;
-    out << std::setprecision(9)
-        << "{\n  \"pictor_version\": \"0.1.0\",\n"
-        << "  \"sd_cpp_revision\": \"90e87bc846f17059771efb8aaa31e9ef0cab6f78\",\n"
-        << "  \"model_type\": " << quote(klein ? "flux2-klein-4b" : "anima") << ",\n"
-        << "  \"model\": " << quote(model.string()) << ",\n";
-    if (klein) out << "  \"text_encoder\": " << quote(text_encoder.string()) << ",\n"
-                   << "  \"vae\": " << quote(vae.string()) << ",\n";
-    out << "  \"backend\": " << quote((klein ? options.backend == pictor::KleinBackend::mlx : options.anima_backend == pictor::AnimaBackend::mlx) ? "mlx" : "ggml") << ",\n";
-    out << "  \"mode\": " << quote(options.reference_images.empty() ? "text-to-image" : "reference-edit") << ",\n";
+    out << fmt::format("{{\n  \"pictor_version\": \"0.1.0\",\n"
+                       "  \"sd_cpp_revision\": \"90e87bc846f17059771efb8aaa31e9ef0cab6f78\",\n"
+                       "  \"model_type\": {},\n  \"model\": {},\n",
+                       quote(klein ? "flux2-klein-4b" : "anima"), quote(model.string()));
+    if (klein) out << fmt::format("  \"text_encoder\": {},\n  \"vae\": {},\n",
+                                  quote(text_encoder.string()), quote(vae.string()));
+    const bool mlx = klein ? options.backend == pictor::KleinBackend::mlx : options.anima_backend == pictor::AnimaBackend::mlx;
+    out << fmt::format("  \"backend\": {},\n  \"mode\": {},\n",
+                       quote(mlx ? "mlx" : "ggml"), quote(options.reference_images.empty() ? "text-to-image" : "reference-edit"));
     if (!options.reference_images.empty()) {
         out << "  \"reference_images\": [";
         for (std::size_t i = 0; i < options.reference_images.size(); ++i) {
             const auto reference = std::filesystem::absolute(options.reference_images[i], ec);
-            if (ec) return pictor::failure(pictor::ErrorCode::io_error, "cannot resolve reference path: " + ec.message());
-            out << (i ? ", " : "") << quote(reference.string());
+            if (ec) return pictor::failure(pictor::ErrorCode::io_error, fmt::format("cannot resolve reference path: {}", ec.message()));
+            out << fmt::format("{}{}", i ? ", " : "", quote(reference.string()));
         }
-        out << "],\n  \"auto_resize_reference\": " << (options.auto_resize_reference ? "true" : "false") << ",\n";
+        out << fmt::format("],\n  \"auto_resize_reference\": {},\n", options.auto_resize_reference);
     }
-    out
-        << "  \"prompt\": " << quote(request.prompt) << ",\n"
-        << "  \"negative_prompt\": " << quote(request.negative_prompt) << ",\n"
-        << "  \"width\": " << image.width << ",\n  \"height\": " << image.height << ",\n"
-        << "  \"steps\": " << request.steps << ",\n  \"cfg_scale\": " << request.cfg_scale << ",\n"
-        << "  \"seed\": " << image.seed << ",\n"
-        << "  \"sampler\": " << quote(klein ? "euler" : "er_sde") << ",\n"
-        << "  \"scheduler\": " << quote(klein ? "discrete" : "smoothstep") << ",\n"
-        << "  \"cache\": " << quote(request.cache == pictor::CacheMode::spectrum ? "spectrum" : "none") << ",\n"
-        << "  \"flash_attention\": " << (klein && options.backend != pictor::KleinBackend::mlx ? "false" : "true") << ",\n"
-        << "  \"diffusion_flash_attention\": true,\n"
-        << "  \"vae_tiling\": " << (request.vae_tiling ? "true" : "false") << ",\n"
-        << "  \"load_seconds\": " << load_seconds << ",\n"
-        << "  \"hidden_state_compression\": " << (options.hidden_state_compression ? "true" : "false") << ",\n"
-        << "  \"batch_count\": " << batch_count << ",\n"
-        << "  \"batch_generation_seconds\": " << batch_seconds << ",\n"
-        << "  \"generation_seconds_kind\": \"batch_average\",\n"
-        << "  \"generation_seconds\": " << image.generation_seconds << "\n}\n";
+    out << fmt::format("  \"prompt\": {},\n  \"negative_prompt\": {},\n"
+                       "  \"width\": {},\n  \"height\": {},\n"
+                       "  \"steps\": {},\n  \"cfg_scale\": {:.9g},\n  \"seed\": {},\n",
+                       quote(request.prompt), quote(request.negative_prompt), image.width, image.height,
+                       request.steps, request.cfg_scale, image.seed);
+    out << fmt::format("  \"sampler\": {},\n  \"scheduler\": {},\n  \"cache\": {},\n"
+                       "  \"flash_attention\": {},\n  \"diffusion_flash_attention\": true,\n"
+                       "  \"vae_tiling\": {},\n",
+                       quote(klein ? "euler" : "er_sde"), quote(klein ? "discrete" : "smoothstep"),
+                       quote(request.cache == pictor::CacheMode::spectrum ? "spectrum" : "none"),
+                       !klein || mlx, request.vae_tiling);
+    out << fmt::format("  \"load_seconds\": {:.9g},\n  \"hidden_state_compression\": {},\n"
+                       "  \"batch_count\": {},\n  \"batch_generation_seconds\": {:.9g},\n"
+                       "  \"generation_seconds_kind\": \"batch_average\",\n"
+                       "  \"generation_seconds\": {:.9g}\n}}\n",
+                       load_seconds, options.hidden_state_compression, batch_count, batch_seconds, image.generation_seconds);
     out.close();
-    if (!out) return pictor::failure(pictor::ErrorCode::io_error, "failed writing metadata: " + path.string());
+    if (!out) return pictor::failure(pictor::ErrorCode::io_error, fmt::format("failed writing metadata: {}", path.string()));
     return {};
 }
 
@@ -87,11 +85,11 @@ int main(int argc, char** argv) {
             std::error_code ec;
             const auto state = std::filesystem::status(destination, ec);
             if (ec && ec != std::errc::no_such_file_or_directory)
-                return report(pictor::failure(pictor::ErrorCode::io_error, "cannot inspect output: " + ec.message()));
+                return report(pictor::failure(pictor::ErrorCode::io_error, fmt::format("cannot inspect output: {}", ec.message())));
             if (!options.overwrite && std::filesystem::exists(state))
-                return report(pictor::failure(pictor::ErrorCode::invalid_argument, "output exists: " + destination.string() + " (use --overwrite)"));
+                return report(pictor::failure(pictor::ErrorCode::invalid_argument, fmt::format("output exists: {} (use --overwrite)", destination.string())));
             if (std::filesystem::is_directory(state))
-                return report(pictor::failure(pictor::ErrorCode::invalid_argument, "output is a directory: " + destination.string()));
+                return report(pictor::failure(pictor::ErrorCode::invalid_argument, fmt::format("output is a directory: {}", destination.string())));
         }
     }
 

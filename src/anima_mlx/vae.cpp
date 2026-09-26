@@ -1,6 +1,7 @@
 // Single-frame Wan decoder, ported from xocialize/anima-mlx (MIT).
 #include "model.hpp"
 #include <cmath>
+#include <spdlog/fmt/fmt.h>
 namespace pictor::anima_mlx {
 array Model::decode(const array &latent) const {
     const auto &w = vae_;
@@ -13,22 +14,22 @@ array Model::decode(const array &latent) const {
     if (bf16_)
         x = mx::astype(x, mx::bfloat16);
     auto conv = [&](const std::string &n, const array &a) {
-        auto weight = w.at(n + ".weight");
+        auto weight = w.at(fmt::format("{}.weight", n));
         // For T=1 causal conv with zero left history, only the final temporal slice contributes.
         if (weight.ndim() == 5)
             weight = mx::squeeze(part(weight, 1, weight.shape(1) - 1, weight.shape(1)), 1);
         auto y = mx::conv2d(a, weight, {1, 1}, {weight.shape(1) / 2, weight.shape(2) / 2});
-        return y + w.at(n + ".bias");
+        return y + w.at(fmt::format("{}.bias", n));
     };
     auto norm = [&](const std::string &n, const array &a) {
         auto l2 = mx::sqrt(mx::sum(a * a, -1, true));
         return a / mx::maximum(l2, array(1e-12f, l2.dtype())) * array(std::sqrt(float(a.shape(-1))), a.dtype()) *
-               w.at(n + ".gamma");
+               w.at(fmt::format("{}.gamma", n));
     };
     auto res = [&](const std::string &n, const array &a) {
-        auto skip = w.count(n + ".conv_shortcut.conv.weight") ? conv(n + ".conv_shortcut.conv", a) : a;
-        auto y = conv(n + ".conv1.conv", silu(norm(n + ".norm1", a)));
-        return conv(n + ".conv2.conv", silu(norm(n + ".norm2", y))) + skip;
+        auto skip = w.count(fmt::format("{}.conv_shortcut.conv.weight", n)) ? conv(fmt::format("{}.conv_shortcut.conv", n), a) : a;
+        auto y = conv(fmt::format("{}.conv1.conv", n), silu(norm(fmt::format("{}.norm1", n), a)));
+        return conv(fmt::format("{}.conv2.conv", n), silu(norm(fmt::format("{}.norm2", n), y))) + skip;
     };
     x = conv("post_quant_conv.conv", x);
     x = conv("decoder.conv_in.conv", x);
@@ -36,23 +37,23 @@ array Model::decode(const array &latent) const {
     {
         std::string n = "decoder.mid_block.attentions.0";
         int h = x.shape(1), wi = x.shape(2), c = x.shape(3);
-        auto qkv = mx::reshape(conv(n + ".to_qkv", norm(n + ".norm", x)), {1, h * wi, 3, c});
+        auto qkv = mx::reshape(conv(fmt::format("{}.to_qkv", n), norm(fmt::format("{}.norm", n), x)), {1, h * wi, 3, c});
         auto q = mx::squeeze(part(qkv, 2, 0, 1), 2), k = mx::squeeze(part(qkv, 2, 1, 2), 2),
              v = mx::squeeze(part(qkv, 2, 2, 3), 2);
         auto scores =
             mx::softmax(mx::matmul(q, mx::transpose(k, {0, 2, 1})) * array(1 / std::sqrt(float(c)), q.dtype()), -1);
-        x = x + conv(n + ".proj", mx::reshape(mx::matmul(scores, v), {1, h, wi, c}));
+        x = x + conv(fmt::format("{}.proj", n), mx::reshape(mx::matmul(scores, v), {1, h, wi, c}));
     }
     x = res("decoder.mid_block.resnets.1", x);
     mx::eval(x);
     for (int i = 0; i < 4; ++i) {
-        auto b = "decoder.up_blocks." + std::to_string(i);
+        auto b = fmt::format("decoder.up_blocks.{}", i);
         for (int j = 0; j < 3; ++j) {
-            x = res(b + ".resnets." + std::to_string(j), x);
+            x = res(fmt::format("{}.resnets.{}", b, j), x);
             mx::eval(x);
         }
         if (i < 3)
-            x = conv(b + ".upsamplers.0.resample.0", mx::repeat(mx::repeat(x, 2, 1), 2, 2));
+            x = conv(fmt::format("{}.upsamplers.0.resample.0", b), mx::repeat(mx::repeat(x, 2, 1), 2, 2));
         mx::eval(x);
     }
     x = conv("decoder.conv_out.conv", silu(norm("decoder.norm_out", x)));

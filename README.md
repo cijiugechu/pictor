@@ -156,6 +156,10 @@ Sidecars identify `generation_seconds_kind: "batch_average"`, `batch_count` and
 `batch_generation_seconds`; `generation_seconds` is that batch time divided by its count.
 PNG paths go to stdout; status/progress/backend diagnostics go to stderr.
 
+Project-owned C++ string construction uses `fmt::format` / `fmt::format_to`
+through `<spdlog/fmt/fmt.h>`, reusing the pinned bundled fmt dependency.
+Keep user text in format arguments; JSON values still require JSON escaping.
+
 Logging uses pinned **spdlog 1.17.0** (header-only, bundled fmt). Application
 messages use the `pictor` logger; sd.cpp/ggml callbacks use the `sd.cpp` logger and
 preserve severity. Backend info/debug messages require `--verbose`; warnings and

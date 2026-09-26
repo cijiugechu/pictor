@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <spdlog/fmt/fmt.h>
 namespace pictor::anima_mlx {
 static Weights load(const std::filesystem::path &p) {
     auto w = mx::load_safetensors(p.string()).first;
@@ -24,7 +25,7 @@ Model::Model(const std::filesystem::path &p, bool int4, bool bf16)
         throw std::invalid_argument("expected the validated 28-layer Anima model");
 }
 static array norm(const Weights &w, const std::string &n, const array &x) {
-    return mx::fast::rms_norm(x, w.at(n + ".weight"), 1e-6f);
+    return mx::fast::rms_norm(x, w.at(fmt::format("{}.weight", n)), 1e-6f);
 }
 static std::pair<array, array> rope(int seq, int dim, float theta, mx::Dtype dtype) {
     auto inv = 1.0f / mx::power(array(theta), mx::arange(0, dim, 2, mx::float32) / float(dim));
@@ -57,15 +58,15 @@ array Model::text(const std::vector<int> &ids) const {
                          {1, int(ids.size()), 1024});
     auto r = rope(int(ids.size()), 128, 1000000.0f, bf16_ ? x.dtype() : mx::float32);
     for (int i = 0; i < 28; ++i) {
-        auto b = "layers." + std::to_string(i), a = b + ".self_attn";
-        auto n = norm(w, b + ".input_layernorm", x);
-        auto q = rotate(norm(w, a + ".q_norm", heads(linear(w, a + ".q_proj", n), 16)), r);
-        auto k = rotate(norm(w, a + ".k_norm", heads(linear(w, a + ".k_proj", n), 8)), r);
-        auto v = heads(linear(w, a + ".v_proj", n), 8);
-        x = x + linear(w, a + ".o_proj", attend(q, k, v, true));
-        n = norm(w, b + ".post_attention_layernorm", x);
-        x = x + linear(w, b + ".mlp.down_proj",
-                       silu(linear(w, b + ".mlp.gate_proj", n)) * linear(w, b + ".mlp.up_proj", n));
+        auto b = fmt::format("layers.{}", i), a = fmt::format("{}.self_attn", b);
+        auto n = norm(w, fmt::format("{}.input_layernorm", b), x);
+        auto q = rotate(norm(w, fmt::format("{}.q_norm", a), heads(linear(w, fmt::format("{}.q_proj", a), n), 16)), r);
+        auto k = rotate(norm(w, fmt::format("{}.k_norm", a), heads(linear(w, fmt::format("{}.k_proj", a), n), 8)), r);
+        auto v = heads(linear(w, fmt::format("{}.v_proj", a), n), 8);
+        x = x + linear(w, fmt::format("{}.o_proj", a), attend(q, k, v, true));
+        n = norm(w, fmt::format("{}.post_attention_layernorm", b), x);
+        x = x + linear(w, fmt::format("{}.mlp.down_proj", b),
+                       silu(linear(w, fmt::format("{}.mlp.gate_proj", b), n)) * linear(w, fmt::format("{}.mlp.up_proj", b), n));
     }
     return norm(w, "norm", x);
 }
@@ -77,17 +78,17 @@ array Model::adapt(const array &context, const std::vector<int> &ids, const std:
     auto rq = rope(x.shape(1), 64, 10000, bf16_ ? x.dtype() : mx::float32);
     auto rk = rope(context.shape(1), 64, 10000, bf16_ ? x.dtype() : mx::float32);
     auto att = [&](const std::string &a, const array &n, const array &ctx, const std::pair<array, array> &kr) {
-        auto q = rotate(norm(w, a + ".q_norm", heads(linear(w, a + ".q_proj", n), 16)), rq);
-        auto k = rotate(norm(w, a + ".k_norm", heads(linear(w, a + ".k_proj", ctx), 16)), kr);
-        auto v = heads(linear(w, a + ".v_proj", ctx), 16);
-        return linear(w, a + ".o_proj", attend(q, k, v));
+        auto q = rotate(norm(w, fmt::format("{}.q_norm", a), heads(linear(w, fmt::format("{}.q_proj", a), n), 16)), rq);
+        auto k = rotate(norm(w, fmt::format("{}.k_norm", a), heads(linear(w, fmt::format("{}.k_proj", a), ctx), 16)), kr);
+        auto v = heads(linear(w, fmt::format("{}.v_proj", a), ctx), 16);
+        return linear(w, fmt::format("{}.o_proj", a), attend(q, k, v));
     };
     for (int i = 0; i < 6; ++i) {
-        auto b = "blocks." + std::to_string(i);
-        auto n = norm(w, b + ".norm_self_attn", x);
-        x = x + att(b + ".self_attn", n, n, rq);
-        x = x + att(b + ".cross_attn", norm(w, b + ".norm_cross_attn", x), context, rk);
-        x = x + linear(w, b + ".mlp.2", gelu(linear(w, b + ".mlp.0", norm(w, b + ".norm_mlp", x))));
+        auto b = fmt::format("blocks.{}", i);
+        auto n = norm(w, fmt::format("{}.norm_self_attn", b), x);
+        x = x + att(fmt::format("{}.self_attn", b), n, n, rq);
+        x = x + att(fmt::format("{}.cross_attn", b), norm(w, fmt::format("{}.norm_cross_attn", b), x), context, rk);
+        x = x + linear(w, fmt::format("{}.mlp.2", b), gelu(linear(w, fmt::format("{}.mlp.0", b), norm(w, fmt::format("{}.norm_mlp", b), x))));
     }
     x = norm(w, "norm", linear(w, "out_proj", x));
     if (!weights.empty())
@@ -137,7 +138,7 @@ array Model::predict(const array &latent, float sigma, const array &context) con
     auto r = image_rope(h / 2, wi / 2);
     auto ctx = bf16_ ? mx::astype(context, mx::bfloat16) : context;
     auto mod = [&](const std::string &b, const array &a, int chunks) {
-        auto e = linear(w, b + ".linear_2", linear(w, b + ".linear_1", embedded)) + part(temb, -1, 0, 2048 * chunks);
+        auto e = linear(w, fmt::format("{}.linear_2", b), linear(w, fmt::format("{}.linear_1", b), embedded)) + part(temb, -1, 0, 2048 * chunks);
         auto parts = mx::split(mx::expand_dims(e, 1), chunks, -1);
         // Preserve reference's explicit mean/variance computation.
         auto mean = mx::mean(a, -1, true);
@@ -147,23 +148,23 @@ array Model::predict(const array &latent, float sigma, const array &context) con
         return parts;
     };
     auto att = [&](const std::string &a, const array &n, const array &kv, bool rotated) {
-        auto q = norm(w, a + ".norm_q", heads(linear(w, a + ".to_q", n), 16));
-        auto k = norm(w, a + ".norm_k", heads(linear(w, a + ".to_k", kv), 16));
-        auto v = heads(linear(w, a + ".to_v", kv), 16);
+        auto q = norm(w, fmt::format("{}.norm_q", a), heads(linear(w, fmt::format("{}.to_q", a), n), 16));
+        auto k = norm(w, fmt::format("{}.norm_k", a), heads(linear(w, fmt::format("{}.to_k", a), kv), 16));
+        auto v = heads(linear(w, fmt::format("{}.to_v", a), kv), 16);
         if (rotated) {
             q = mx::astype(rotate(mx::astype(q, mx::float32), r), v.dtype());
             k = mx::astype(rotate(mx::astype(k, mx::float32), r), v.dtype());
         }
-        return linear(w, a + ".to_out.0", attend(q, k, v));
+        return linear(w, fmt::format("{}.to_out.0", a), attend(q, k, v));
     };
     for (int i = 0; i < 28; ++i) {
-        auto b = "transformer_blocks." + std::to_string(i);
-        auto m = mod(b + ".norm1", x, 3);
-        x = x + m[2] * att(b + ".attn1", m[0], m[0], true);
-        m = mod(b + ".norm2", x, 3);
-        x = x + m[2] * att(b + ".attn2", m[0], ctx, false);
-        m = mod(b + ".norm3", x, 3);
-        x = x + m[2] * linear(w, b + ".ff.net.2", gelu(linear(w, b + ".ff.net.0.proj", m[0])));
+        auto b = fmt::format("transformer_blocks.{}", i);
+        auto m = mod(fmt::format("{}.norm1", b), x, 3);
+        x = x + m[2] * att(fmt::format("{}.attn1", b), m[0], m[0], true);
+        m = mod(fmt::format("{}.norm2", b), x, 3);
+        x = x + m[2] * att(fmt::format("{}.attn2", b), m[0], ctx, false);
+        m = mod(fmt::format("{}.norm3", b), x, 3);
+        x = x + m[2] * linear(w, fmt::format("{}.ff.net.2", b), gelu(linear(w, fmt::format("{}.ff.net.0.proj", b), m[0])));
     }
     x = linear(w, "proj_out", mod("norm_out", x, 2)[0]);
     return mx::reshape(mx::transpose(mx::reshape(x, {1, h / 2, wi / 2, 2, 2, 16}), {0, 5, 1, 3, 2, 4}), {1, 16, h, wi});

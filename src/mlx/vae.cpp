@@ -2,6 +2,7 @@
 #include "vae.hpp"
 #include <algorithm>
 #include <stdexcept>
+#include <spdlog/fmt/fmt.h>
 
 namespace pictor::mlx_backend {
 namespace {
@@ -27,17 +28,17 @@ Weights convert_original(Weights weights) {
             replace(name, ".mid.attn_1.", ".mid_block.attentions.0.");
             replace(name, ".norm.", ".group_norm.");
             for (const auto &item : {std::pair{"q", "to_q"}, {"k", "to_k"}, {"v", "to_v"}, {"proj_out", "to_out"}})
-                replace(name, "." + std::string(item.first) + ".", "." + std::string(item.second) + ".");
+                replace(name, fmt::format(".{}.", item.first), fmt::format(".{}.", item.second));
         }
         for (int i = 0; i < 4; ++i) {
-            replace(name, "encoder.down." + std::to_string(i) + ".block.",
-                    "encoder.down_blocks." + std::to_string(i) + ".resnets.");
-            replace(name, "encoder.down." + std::to_string(i) + ".downsample.",
-                    "encoder.down_blocks." + std::to_string(i) + ".downsamplers.0.");
-            replace(name, "decoder.up." + std::to_string(i) + ".block.",
-                    "decoder.up_blocks." + std::to_string(3 - i) + ".resnets.");
-            replace(name, "decoder.up." + std::to_string(i) + ".upsample.",
-                    "decoder.up_blocks." + std::to_string(3 - i) + ".upsamplers.0.");
+            replace(name, fmt::format("encoder.down.{}.block.", i),
+                    fmt::format("encoder.down_blocks.{}.resnets.", i));
+            replace(name, fmt::format("encoder.down.{}.downsample.", i),
+                    fmt::format("encoder.down_blocks.{}.downsamplers.0.", i));
+            replace(name, fmt::format("decoder.up.{}.block.", i),
+                    fmt::format("decoder.up_blocks.{}.resnets.", 3 - i));
+            replace(name, fmt::format("decoder.up.{}.upsample.", i),
+                    fmt::format("decoder.up_blocks.{}.upsamplers.0.", 3 - i));
         }
         if (value.ndim() == 4)
             value = attn ? mx::reshape(value, {value.shape(0), value.shape(1)}) : mx::transpose(value, {0, 2, 3, 1});
@@ -53,10 +54,10 @@ Vae::Vae(const std::filesystem::path &path) : weights_(load_weights(path)) {
         throw std::invalid_argument("MLX requires a complete Flux2 VAE (original or Small Decoder)");
 }
 array Vae::conv(const std::string &n, const array &x, int stride, int padding) const {
-    const auto &weight = weights_.at(n + ".weight");
+    const auto &weight = weights_.at(fmt::format("{}.weight", n));
     if (padding < 0)
         padding = weight.shape(1) / 2;
-    return mx::conv2d(x, weight, {stride, stride}, {padding, padding}) + weights_.at(n + ".bias");
+    return mx::conv2d(x, weight, {stride, stride}, {padding, padding}) + weights_.at(fmt::format("{}.bias", n));
 }
 array Vae::norm(const std::string &n, const array &x) const {
     const int c = x.shape(3), hw = x.shape(1) * x.shape(2);
@@ -64,33 +65,33 @@ array Vae::norm(const std::string &n, const array &x) const {
     y = mx::reshape(mx::transpose(y, {0, 2, 1, 3}), {1, 32, hw * c / 32});
     y = layer_norm(y);
     y = mx::reshape(mx::transpose(mx::reshape(y, {1, 32, hw, c / 32}), {0, 2, 1, 3}), x.shape());
-    return mx::astype(weights_.at(n + ".weight") * y + weights_.at(n + ".bias"), mx::bfloat16);
+    return mx::astype(weights_.at(fmt::format("{}.weight", n)) * y + weights_.at(fmt::format("{}.bias", n)), mx::bfloat16);
 }
 array Vae::resnet(const std::string &n, const array &x) const {
-    auto y = conv(n + ".conv1", silu(norm(n + ".norm1", x)));
-    y = conv(n + ".conv2", silu(norm(n + ".norm2", y)));
-    return y + (weights_.count(n + ".conv_shortcut.weight") ? conv(n + ".conv_shortcut", x) : x);
+    auto y = conv(fmt::format("{}.conv1", n), silu(norm(fmt::format("{}.norm1", n), x)));
+    y = conv(fmt::format("{}.conv2", n), silu(norm(fmt::format("{}.norm2", n), y)));
+    return y + (weights_.count(fmt::format("{}.conv_shortcut.weight", n)) ? conv(fmt::format("{}.conv_shortcut", n), x) : x);
 }
 array Vae::mid(const std::string &n, array x) const {
-    x = resnet(n + ".resnets.0", x);
-    const std::string a = n + ".attentions.0";
-    const auto y = norm(a + ".group_norm", x);
+    x = resnet(fmt::format("{}.resnets.0", n), x);
+    const std::string a = fmt::format("{}.attentions.0", n);
+    const auto y = norm(fmt::format("{}.group_norm", a), x);
     const auto qkv = [&](const std::string &suffix) {
-        return mx::reshape(linear(weights_, a + suffix, y), {1, 1, x.shape(1) * x.shape(2), x.shape(3)});
+        return mx::reshape(linear(weights_, fmt::format("{}{}", a, suffix), y), {1, 1, x.shape(1) * x.shape(2), x.shape(3)});
     };
     const auto out = mx::reshape(attention(qkv(".to_q"), qkv(".to_k"), qkv(".to_v")), x.shape());
-    x = x + linear(weights_, a + ".to_out", out);
-    return resnet(n + ".resnets.1", x);
+    x = x + linear(weights_, fmt::format("{}.to_out", a), out);
+    return resnet(fmt::format("{}.resnets.1", n), x);
 }
 array Vae::encode(const array &pixels) {
     auto x = conv("encoder.conv_in", mx::astype(pixels, mx::bfloat16));
     for (int i = 0; i < 4; ++i) {
-        const auto b = "encoder.down_blocks." + std::to_string(i);
+        const auto b = fmt::format("encoder.down_blocks.{}", i);
         for (int j = 0; j < 2; ++j)
-            x = resnet(b + ".resnets." + std::to_string(j), x);
+            x = resnet(fmt::format("{}.resnets.{}", b, j), x);
         if (i < 3) {
             x = mx::pad(x, {{0, 0}, {0, 1}, {0, 1}, {0, 0}});
-            x = conv(b + ".downsamplers.0.conv", x, 2, 0);
+            x = conv(fmt::format("{}.downsamplers.0.conv", b), x, 2, 0);
         }
     }
     x = mid("encoder.mid_block", x);
@@ -109,11 +110,11 @@ array Vae::decode_latent(array x) const {
     x = conv("post_quant_conv", x);
     x = mid("decoder.mid_block", conv("decoder.conv_in", x));
     for (int i = 0; i < 4; ++i) {
-        const auto b = "decoder.up_blocks." + std::to_string(i);
+        const auto b = fmt::format("decoder.up_blocks.{}", i);
         for (int j = 0; j < 3; ++j)
-            x = resnet(b + ".resnets." + std::to_string(j), x);
+            x = resnet(fmt::format("{}.resnets.{}", b, j), x);
         if (i < 3)
-            x = conv(b + ".upsamplers.0.conv", mx::repeat(mx::repeat(x, 2, 1), 2, 2));
+            x = conv(fmt::format("{}.upsamplers.0.conv", b), mx::repeat(mx::repeat(x, 2, 1), 2, 2));
     }
     return conv("decoder.conv_out", silu(norm("decoder.conv_norm_out", x)));
 }

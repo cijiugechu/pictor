@@ -3,6 +3,7 @@
 #include "stb_image_write.h"
 #include <cstdio>
 #include <cstdlib>
+#include <spdlog/fmt/fmt.h>
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); return 1; } } while (0)
 struct TempDirectory {
@@ -17,7 +18,7 @@ int main() {
     for (int attempt = 0; attempt < 10 && temp.path.empty(); ++attempt) {
         std::int64_t seed;
         CHECK(pictor::resolve_seed(-1, seed));
-        auto path = root / ("pictor-images-" + std::to_string(seed));
+        auto path = root / fmt::format("pictor-images-{}", seed);
         if (std::filesystem::create_directory(path, ec)) temp.path = std::move(path);
         CHECK(!ec);
     }

@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstring>
 #include <optional>
+#include <spdlog/fmt/fmt.h>
 
 namespace pictor::detail {
 using namespace mlx_backend;
@@ -68,7 +69,7 @@ Status MlxSession::create(const FluxKleinOptions &options, std::unique_ptr<MlxSe
     try {
         for (const auto &path : {options.diffusion_model_path, options.text_encoder_path, options.vae_path})
             if (!std::filesystem::exists(path))
-                return failure(ErrorCode::invalid_argument, "MLX weights not found: " + path.string());
+                return failure(ErrorCode::invalid_argument, fmt::format("MLX weights not found: {}", path.string()));
         std::lock_guard<std::mutex> lock(inference_mutex());
         RuntimeScope runtime;
         TokenizerLogScope log;

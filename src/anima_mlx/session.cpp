@@ -8,6 +8,7 @@
 #include <chrono>
 #include <mutex>
 #include <optional>
+#include <spdlog/fmt/fmt.h>
 
 namespace pictor::detail {
 using namespace anima_mlx;
@@ -39,8 +40,8 @@ Status AnimaMlxSession::create(const SessionOptions &options, std::unique_ptr<An
               "llm_adapter-bf16.safetensors", "vae-bf16.safetensors"})
             if (!std::filesystem::is_regular_file(directory / name))
                 return failure(ErrorCode::invalid_argument,
-                               "Anima MLX weights not found: " + (directory / name).string() +
-                                   "; convert P3 with scripts/convert-anima-p3.py or select --backend ggml");
+                               fmt::format("Anima MLX weights not found: {}; convert P3 with scripts/convert-anima-p3.py or select --backend ggml",
+                                           (directory / name).string()));
         std::lock_guard<std::mutex> lock(inference_mutex());
         RuntimeScope runtime;
         TokenizerLogScope log;

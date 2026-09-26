@@ -65,11 +65,16 @@ int main() {
     require(cli::output_path(options, 0, path).ok() && path == "some dir/a.b-001.png", "first batch output");
     require(cli::output_path(options, 1, path).ok() && path == "some dir/a.b-002.png", "second batch output");
     require(!cli::output_path(options, 2, path) && path.empty(), "invalid batch output");
+    options.output = "some dir/猫{seed}.png";
+    require(cli::output_path(options, 1, path).ok() && path == "some dir/猫{seed}-002.png", "literal filename characters");
     std::int64_t seed;
     require(resolve_seed(123, seed).ok() && seed == 123, "fixed seed");
     require(resolve_seed(-1, seed).ok() && seed >= 0, "random seed");
     require(!resolve_seed(-2, seed) && seed == 0, "invalid seed");
     require(cli::json_string("quote\"\n\\") == "\"quote\\\"\\u000a\\\\\"", "JSON escaping");
+    require(cli::json_string(std::string_view("\0\x01\t\r\x1f", 5)) == "\"\\u0000\\u0001\\u0009\\u000d\\u001f\"", "JSON control bytes");
+    require(cli::json_string("猫 café {prompt}") == "\"猫 café {prompt}\"", "JSON preserves Unicode and braces");
+    require(cli::json_string("") == "\"\"", "JSON empty string");
     require(parse({}).help && parse({"--help"}).help && parse({"anima", "--help"}).help, "help");
     require(parse({"--version"}).version, "version");
     options = parse({"flux-klein", "-p", "a fox"});
